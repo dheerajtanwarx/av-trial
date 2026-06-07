@@ -1,0 +1,27 @@
+// CREATE TABLE product_images (
+//     id              INT AUTO_INCREMENT PRIMARY KEY,
+//     product_id      INT NOT NULL,
+//     variant_id      INT NULL,
+//     image_url       VARCHAR(500) NOT NULL,
+//     is_primary      BOOLEAN DEFAULT FALSE,
+//     sort_order      INT DEFAULT 0,
+//     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+//     FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
+//     FOREIGN KEY (variant_id) REFERENCES product_variants(id) ON DELETE SET NULL
+// );
+
+model ProductImage {
+  id        Int      @id @default(autoincrement())
+  productId Int
+  variantId Int?
+  imageUrl  String
+  isPrimary Boolean  @default(false)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  product Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variant ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+
+  @@map("product_images")
+}

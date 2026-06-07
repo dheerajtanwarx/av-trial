@@ -1,0 +1,58 @@
+// CREATE TABLE orders (
+//     id              INT AUTO_INCREMENT PRIMARY KEY,
+//     user_id         INT NOT NULL,
+//     address_id      INT NOT NULL,
+//     total_amount    DECIMAL(10, 2) NOT NULL,
+//     discount        DECIMAL(10, 2) DEFAULT 0.00,
+//     final_amount    DECIMAL(10, 2) NOT NULL,
+//     status          ENUM(
+//                         'placed',
+//                         'confirmed',
+//                         'processing',
+//                         'shipped',
+//                         'delivered',
+//                         'cancelled',
+//                         'returned'
+//                     ) DEFAULT 'placed',
+//     tracking_number VARCHAR(100),
+//     notes           TEXT,
+//     placed_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+//     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+
+//     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
+//     FOREIGN KEY (address_id) REFERENCES addresses(id) ON DELETE RESTRICT
+// );
+
+enum OrderStatus {
+  PLACED
+  CONFIRMED
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  RETURNED
+}
+
+model Order {
+  id             Int         @id @default(autoincrement())
+  userId         Int
+  addressId      Int
+  totalAmount    Decimal     @db.Decimal(10, 2)
+  discount       Decimal     @default(0) @db.Decimal(10, 2)
+  finalAmount    Decimal     @db.Decimal(10, 2)
+  status         OrderStatus @default(PLACED)
+  trackingNumber String?
+  notes          String?
+  placedAt       DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Restrict)
+  address Address @relation(fields: [addressId], references: [id], onDelete: Restrict)
+
+  //reverse relation
+  items    OrderItem[]
+  payments Payment[]
+  reviews  Review[]
+
+  @@map("orders")
+}

@@ -1,0 +1,44 @@
+// CREATE TABLE payments (
+//     id              INT AUTO_INCREMENT PRIMARY KEY,
+//     order_id        INT NOT NULL,
+//     method          ENUM('upi', 'card', 'netbanking', 'cod', 'wallet') NOT NULL,
+//     status          ENUM('pending', 'success', 'failed', 'refunded') DEFAULT 'pending',
+//     transaction_id  VARCHAR(200) UNIQUE,
+//     amount          DECIMAL(10, 2) NOT NULL,
+//     gateway         VARCHAR(50),
+//     paid_at         TIMESTAMP NULL,
+//     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+//     FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE RESTRICT
+// );
+
+enum PaymentMethod {
+  UPI
+  CARD
+  NETBANKING
+  COD
+  WALLET
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+model Payment {
+  id            Int           @id @default(autoincrement())
+  orderId       Int
+  method        PaymentMethod
+  status        PaymentStatus @default(PENDING)
+  transactionId String?       @unique
+  amount        Decimal       @db.Decimal(10, 2)
+  gateway       String?
+  paidAt        DateTime?
+  createdAt     DateTime      @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  @@map("payments")
+}

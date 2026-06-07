@@ -1,0 +1,31 @@
+model User {
+  id Int @id @default(autoincrement())
+
+  email String @unique
+
+  name String?
+
+  password_hash String
+
+  phone String
+
+  role Role
+
+  created_at DateTime @default(now())
+
+  //reverse relation
+  orders  Order[]
+  reviews Review[]
+
+  addresses Address[]
+  cartItems CartItem[]
+
+  accounts  Account[]
+  sessions  Session[]
+  otpTokens OtpToken[]
+}
+
+enum Role {
+  USER
+  ADMIN
+}

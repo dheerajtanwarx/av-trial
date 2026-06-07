@@ -1,0 +1,25 @@
+//simple format smjhne k liye
+// CREATE TABLE categories (
+//     id          INT AUTO_INCREMENT PRIMARY KEY,
+//     parent_id   INT NULL,
+//     name        VARCHAR(100) NOT NULL,
+//     slug        VARCHAR(100) NOT NULL UNIQUE,
+
+//     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+//     FOREIGN KEY (parent_id) REFERENCES categories(id) ON DELETE SET NULL
+// );
+
+model Category {
+  id        Int      @id @default(autoincrement())
+  parentId  Int?
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+
+  parent   Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children Category[] @relation("CategoryHierarchy")
+  products Product[]
+
+  @@map("categories")
+}

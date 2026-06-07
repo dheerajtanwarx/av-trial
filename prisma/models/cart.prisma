@@ -1,0 +1,28 @@
+// CREATE TABLE cart_items (
+//     id              INT AUTO_INCREMENT PRIMARY KEY,
+//     user_id         INT NOT NULL,
+//     variant_id      INT NOT NULL,
+//     quantity        INT NOT NULL DEFAULT 1,
+//     added_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+//     UNIQUE KEY unique_cart_item (user_id, variant_id),
+// //   ************  UNIQUE KEY (user_id, variant_id) ka matlab:
+// // Priya ek hi Pink Lehenga ko cart mein baar baar add nahi kar sakti — duplicate row nahi banega. Quantity update hogi instead.**************************
+
+//     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+//     FOREIGN KEY (variant_id) REFERENCES product_variants(id) ON DELETE CASCADE
+//);
+
+model CartItem {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  variantId Int
+  quantity  Int      @default(1)
+  addedAt   DateTime @default(now())
+
+  user    User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  variant ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, variantId])
+  @@map("cart_items")
+}

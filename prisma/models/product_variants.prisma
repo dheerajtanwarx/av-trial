@@ -1,0 +1,32 @@
+//simple format smjhne ke liye
+// CREATE TABLE product_variants (
+//     id              INT AUTO_INCREMENT PRIMARY KEY,
+//     product_id      INT NOT NULL,
+//     color           VARCHAR(50) NOT NULL,
+//     color_hex       VARCHAR(7) NOT NULL,
+//     price           DECIMAL(10, 2) NOT NULL,
+//     stock_qty       INT NOT NULL DEFAULT 0,
+//     sku             VARCHAR(100) NOT NULL UNIQUE,
+//     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+//     FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+// );
+
+model ProductVariant {
+  id        Int      @id @default(autoincrement())
+  productId Int
+  color     String
+  colorHex  String
+  price     Decimal  @db.Decimal(10, 2)
+  stockQty  Int      @default(0)
+  sku       String   @unique
+  createdAt DateTime @default(now())
+
+  product   Product        @relation(fields: [productId], references: [id], onDelete: Cascade)
+  //reverse relation
+  images    ProductImage[]
+  items     OrderItem[]
+  cartItems CartItem[]
+
+  @@map("product_variants")
+}
