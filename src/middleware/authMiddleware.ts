@@ -29,3 +29,17 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
     res.status(401).json({ error: "Invalid or expired token" });
   }
 }
+
+/** Attach req.currentUser when a valid token is present, but never reject —
+    used by routes that work for both guests and signed-in users. */
+export function optionalAuth(req: Request, _res: Response, next: NextFunction): void {
+  const token = req.cookies?.[COOKIE_NAME];
+  if (token) {
+    try {
+      req.currentUser = jwt.verify(token, JWT_SECRET) as JwtPayload;
+    } catch {
+      /* ignore invalid token — treat as guest */
+    }
+  }
+  next();
+}

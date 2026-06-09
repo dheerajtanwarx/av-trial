@@ -1,0 +1,23 @@
+// CREATE TABLE promos (
+//     id          INT AUTO_INCREMENT PRIMARY KEY,
+//     code        VARCHAR(50) NOT NULL UNIQUE,
+//     pct         DECIMAL(5, 4) NOT NULL,   -- 0.1000 = 10% off
+//     label       VARCHAR(200) NOT NULL,
+//     active       BOOLEAN DEFAULT TRUE,
+//     min_spend   DECIMAL(10, 2) NULL,
+//     expires_at  TIMESTAMP NULL,
+//     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+// );
+
+model Promo {
+  id        Int       @id @default(autoincrement())
+  code      String    @unique
+  pct       Decimal   @db.Decimal(5, 4)
+  label     String
+  active    Boolean   @default(true)
+  minSpend  Decimal?  @db.Decimal(10, 2)
+  expiresAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@map("promos")
+}

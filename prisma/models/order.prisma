@@ -41,6 +41,8 @@ model Order {
   discount       Decimal     @default(0) @db.Decimal(10, 2)
   finalAmount    Decimal     @db.Decimal(10, 2)
   status         OrderStatus @default(PLACED)
+  shippingMethod String?
+  shippingFee    Decimal     @default(0) @db.Decimal(10, 2)
   trackingNumber String?
   notes          String?
   placedAt       DateTime    @default(now())

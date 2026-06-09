@@ -5,6 +5,14 @@ import cookieParser from "cookie-parser";
 import passport from "passport";
 import { configurePassport } from "./config/passport";
 import authRouter from "./routes/auth";
+import productsRouter from "./routes/products";
+import categoriesRouter from "./routes/categories";
+import promosRouter from "./routes/promos";
+import newsletterRouter from "./routes/newsletter";
+import ordersRouter from "./routes/orders";
+import cartRouter from "./routes/cart";
+import addressesRouter from "./routes/addresses";
+import reviewsRouter from "./routes/reviews";
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 4000);
@@ -24,7 +32,16 @@ app.use(cookieParser());
 configurePassport();
 app.use(passport.initialize());
 
-app.use("/auth", authRouter);
+app.use("/api/auth", authRouter);
+
+app.use("/api/products", productsRouter);
+app.use("/api/categories", categoriesRouter);
+app.use("/api/promos", promosRouter);
+app.use("/api/newsletter", newsletterRouter);
+app.use("/api/orders", ordersRouter);
+app.use("/api/cart", cartRouter);
+app.use("/api/addresses", addressesRouter);
+app.use("/api/reviews", reviewsRouter);
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });

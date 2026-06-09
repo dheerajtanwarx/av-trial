@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import passport from "passport";
 import jwt from "jsonwebtoken";
 import { JwtPayload } from "../config/passport";
+import { prisma } from "../lib/prisma";
 
 const router = Router();
 
@@ -16,6 +17,31 @@ const COOKIE_OPTIONS = {
   maxAge: 7 * 24 * 60 * 60 * 1000,
 };
 
+/* OTP policy */
+const OTP_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const OTP_RESEND_COOLDOWN_MS = 30 * 1000; // 30 seconds
+
+type AuthUser = { id: number; email: string | null; name: string | null };
+
+/** Sign the JWT and set the av_token cookie. Shared by Google + phone flows. */
+function issueAuthCookie(res: Response, user: AuthUser): JwtPayload {
+  const payload: JwtPayload = {
+    id: String(user.id),
+    email: user.email ?? "",
+    name: user.name ?? "",
+  };
+  const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
+  res.cookie(COOKIE_NAME, token, COOKIE_OPTIONS);
+  return payload;
+}
+
+/** Validate an Indian 10-digit mobile and normalize to E.164 (+91XXXXXXXXXX). */
+function normalizeIndianPhone(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const digits = raw.replace(/\D/g, "").replace(/^91/, "");
+  return /^[6-9]\d{9}$/.test(digits) ? `+91${digits}` : null;
+}
+
 router.get(
   "/google",
   passport.authenticate("google", { session: false, scope: ["profile", "email"] })
@@ -28,21 +54,13 @@ router.get(
     failureRedirect: `${FRONTEND_URL}/login?error=oauth_failed`,
   }),
   (req: Request, res: Response) => {
-    const user = req.user as { id: number; email: string | null; name: string | null };
-
-    const payload: JwtPayload = {
-      id: String(user.id),
-      email: user.email ?? "",
-      name: user.name ?? "",
-    };
-
-    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
-    res.cookie(COOKIE_NAME, token, COOKIE_OPTIONS);
+    const user = req.user as AuthUser;
+    issueAuthCookie(res, user);
     res.redirect(`${FRONTEND_URL}/`);
   }
 );
 
-router.get("/me", (req: Request, res: Response) => {
+router.get("/me", async (req: Request, res: Response) => {
   const token = req.cookies?.[COOKIE_NAME];
   if (!token) {
     res.status(401).json({ error: "Not authenticated" });
@@ -50,7 +68,27 @@ router.get("/me", (req: Request, res: Response) => {
   }
   try {
     const payload = jwt.verify(token, JWT_SECRET) as JwtPayload;
-    res.json({ user: payload });
+    const user = await prisma.user.findUnique({
+      where: { id: Number(payload.id) },
+      include: { accounts: { select: { provider: true } } },
+    });
+
+    if (!user) {
+      res.status(401).json({ error: "User no longer exists" });
+      return;
+    }
+
+    res.json({
+      user: {
+        id: String(user.id),
+        email: user.email ?? "",
+        name: user.name ?? "",
+        phone: user.phone ?? "",
+        role: user.role,
+        createdAt: user.created_at.toISOString(),
+        providers: user.accounts.map((account) => account.provider),
+      },
+    });
   } catch {
     res.status(401).json({ error: "Invalid or expired token" });
   }
@@ -59,6 +97,112 @@ router.get("/me", (req: Request, res: Response) => {
 router.post("/logout", (_req: Request, res: Response) => {
   res.clearCookie(COOKIE_NAME, { httpOnly: true, sameSite: "lax" });
   res.json({ success: true });
+});
+
+/* ============================================================
+   Phone OTP (dev mock — no real SMS)
+   ------------------------------------------------------------
+   send:   validate phone, enforce login/signup existence rules,
+           generate a 6-digit code, store it, log + return devOtp.
+   verify: check the code, then find-or-create per mode and issue
+           the same av_token JWT cookie the Google flow uses.
+   ============================================================ */
+
+router.post("/otp/send", async (req: Request, res: Response) => {
+  const phone = normalizeIndianPhone(req.body?.phone);
+  const mode = req.body?.mode === "signup" ? "signup" : "login";
+
+  if (!phone) {
+    res.status(400).json({ error: "Enter a valid 10-digit Indian mobile number." });
+    return;
+  }
+
+  try {
+    const existingUser = await prisma.user.findUnique({ where: { phone } });
+    if (mode === "signup" && existingUser) {
+      res.status(409).json({ error: "An account with this number already exists. Please log in." });
+      return;
+    }
+    if (mode === "login" && !existingUser) {
+      res.status(404).json({ error: "No account found for this number. Please sign up." });
+      return;
+    }
+
+    // 30s resend cooldown per phone.
+    const existingOtp = await prisma.otpToken.findUnique({ where: { phone } });
+    if (existingOtp && Date.now() - existingOtp.createdAt.getTime() < OTP_RESEND_COOLDOWN_MS) {
+      const wait = Math.ceil(
+        (OTP_RESEND_COOLDOWN_MS - (Date.now() - existingOtp.createdAt.getTime())) / 1000
+      );
+      res.status(429).json({ error: `Please wait ${wait}s before requesting another code.` });
+      return;
+    }
+
+    const otp = String(Math.floor(100000 + Math.random() * 900000));
+    const expires = new Date(Date.now() + OTP_TTL_MS);
+
+    await prisma.otpToken.upsert({
+      where: { phone },
+      create: { phone, otp, expires, userId: existingUser?.id ?? null },
+      update: { otp, expires, createdAt: new Date(), userId: existingUser?.id ?? null },
+    });
+
+    // DEV MOCK: no SMS provider wired up — surface the code instead.
+    console.log(`[otp] ${phone} -> ${otp} (mode=${mode}, expires in 5m)`);
+    res.json({ ok: true, devOtp: otp });
+  } catch (err) {
+    console.error("otp/send failed", err);
+    res.status(500).json({ error: "Could not send the code. Please try again." });
+  }
+});
+
+router.post("/otp/verify", async (req: Request, res: Response) => {
+  const phone = normalizeIndianPhone(req.body?.phone);
+  const otp = typeof req.body?.otp === "string" ? req.body.otp.trim() : "";
+  const mode = req.body?.mode === "signup" ? "signup" : "login";
+  const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+
+  if (!phone || !/^\d{6}$/.test(otp)) {
+    res.status(400).json({ error: "Invalid phone number or code." });
+    return;
+  }
+
+  try {
+    const token = await prisma.otpToken.findUnique({ where: { phone } });
+    if (!token || token.otp !== otp) {
+      res.status(400).json({ error: "Incorrect code. Please check and try again." });
+      return;
+    }
+    if (token.expires.getTime() < Date.now()) {
+      await prisma.otpToken.delete({ where: { phone } }).catch(() => {});
+      res.status(400).json({ error: "This code has expired. Please request a new one." });
+      return;
+    }
+
+    let user = await prisma.user.findUnique({ where: { phone } });
+
+    if (mode === "signup") {
+      if (user) {
+        res.status(409).json({ error: "An account with this number already exists. Please log in." });
+        return;
+      }
+      user = await prisma.user.create({ data: { phone, name: name || null } });
+    } else {
+      if (!user) {
+        res.status(404).json({ error: "No account found for this number. Please sign up." });
+        return;
+      }
+    }
+
+    // Single-use: clear the code once consumed.
+    await prisma.otpToken.delete({ where: { phone } }).catch(() => {});
+
+    const payload = issueAuthCookie(res, user);
+    res.json({ user: payload });
+  } catch (err) {
+    console.error("otp/verify failed", err);
+    res.status(500).json({ error: "Could not verify the code. Please try again." });
+  }
 });
 
 export default router;

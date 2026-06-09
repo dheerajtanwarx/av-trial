@@ -14,6 +14,7 @@ model OrderItem {
   id         Int     @id @default(autoincrement())
   orderId    Int
   variantId  Int
+  size       String?
   quantity   Int
   unitPrice  Decimal @db.Decimal(10, 2)
   totalPrice Decimal @db.Decimal(10, 2)

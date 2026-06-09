@@ -12,13 +12,22 @@
 // );
 
 model Product {
-  id          Int      @id @default(autoincrement())
-  categoryId  Int
-  name        String
-  description String?
-  basePrice   Decimal  @db.Decimal(10, 2)
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
+  id           Int      @id @default(autoincrement())
+  categoryId   Int
+  name         String
+  slug         String   @unique
+  type         String?
+  description  String?  @db.Text
+  basePrice    Decimal  @db.Decimal(10, 2)
+  comparePrice Decimal? @db.Decimal(10, 2)
+  badge        String?
+  rating       Float?
+  reviewCount  Int?
+  isBestseller Boolean  @default(false)
+  isActive     Boolean  @default(true)
+  sizes        Json?
+  pdpOverride  Json?
+  createdAt    DateTime @default(now())
 
   category Category         @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   //reverse relation 
