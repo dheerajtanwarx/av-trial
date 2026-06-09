@@ -34,7 +34,7 @@ model VerificationToken {
 
 model OtpToken {
   id        String   @id @default(cuid())
-  phone     String
+ phone String? @unique
   otp       String
   expires   DateTime
   userId    Int?

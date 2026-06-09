@@ -1,19 +1,18 @@
 model User {
   id Int @id @default(autoincrement())
 
-  email String @unique
+  email String? @unique
 
   name String?
 
-  password_hash String
+  password_hash String?
 
-  phone String
+  phone String? @unique
 
-  role Role
+  role Role @default(USER)
 
   created_at DateTime @default(now())
 
-  //reverse relation
   orders  Order[]
   reviews Review[]
 
