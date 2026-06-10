@@ -17,6 +17,16 @@ const COOKIE_OPTIONS = {
   maxAge: 7 * 24 * 60 * 60 * 1000,
 };
 
+function safeFrontendPath(raw: unknown): string {
+  if (typeof raw !== "string") return "/";
+  try {
+    const decoded = decodeURIComponent(raw);
+    return decoded.startsWith("/") && !decoded.startsWith("//") ? decoded : "/";
+  } catch {
+    return "/";
+  }
+}
+
 /* OTP policy */
 const OTP_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const OTP_RESEND_COOLDOWN_MS = 30 * 1000; // 30 seconds
@@ -44,7 +54,13 @@ function normalizeIndianPhone(raw: unknown): string | null {
 
 router.get(
   "/google",
-  passport.authenticate("google", { session: false, scope: ["profile", "email"] })
+  (req: Request, res: Response, next) => {
+    passport.authenticate("google", {
+      session: false,
+      scope: ["profile", "email"],
+      state: encodeURIComponent(safeFrontendPath(req.query.next)),
+    })(req, res, next);
+  }
 );
 
 router.get(
@@ -56,7 +72,7 @@ router.get(
   (req: Request, res: Response) => {
     const user = req.user as AuthUser;
     issueAuthCookie(res, user);
-    res.redirect(`${FRONTEND_URL}/`);
+    res.redirect(`${FRONTEND_URL}${safeFrontendPath(req.query.state)}`);
   }
 );
 
