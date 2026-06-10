@@ -3,6 +3,7 @@ import passport from "passport";
 import jwt from "jsonwebtoken";
 import { JwtPayload } from "../config/passport";
 import { prisma } from "../lib/prisma";
+import { requireAuth } from "../middleware/authMiddleware";
 
 const router = Router();
 
@@ -76,6 +77,27 @@ router.get(
   }
 );
 
+/** Shape a user (with accounts) into the session-user payload the frontend expects. */
+function serializeSessionUser(user: {
+  id: number;
+  email: string | null;
+  name: string | null;
+  phone: string | null;
+  role: string;
+  created_at: Date;
+  accounts: { provider: string }[];
+}) {
+  return {
+    id: String(user.id),
+    email: user.email ?? "",
+    name: user.name ?? "",
+    phone: user.phone ?? "",
+    role: user.role,
+    createdAt: user.created_at.toISOString(),
+    providers: user.accounts.map((account) => account.provider),
+  };
+}
+
 router.get("/me", async (req: Request, res: Response) => {
   const token = req.cookies?.[COOKIE_NAME];
   if (!token) {
@@ -94,19 +116,58 @@ router.get("/me", async (req: Request, res: Response) => {
       return;
     }
 
-    res.json({
-      user: {
-        id: String(user.id),
-        email: user.email ?? "",
-        name: user.name ?? "",
-        phone: user.phone ?? "",
-        role: user.role,
-        createdAt: user.created_at.toISOString(),
-        providers: user.accounts.map((account) => account.provider),
-      },
-    });
+    res.json({ user: serializeSessionUser(user) });
   } catch {
     res.status(401).json({ error: "Invalid or expired token" });
+  }
+});
+
+/* PATCH /api/auth/me — update the signed-in user's own profile (name + phone).
+   Email is intentionally read-only: it's tied to the Google identity. */
+router.patch("/me", requireAuth, async (req: Request, res: Response) => {
+  const userId = Number(req.currentUser!.id);
+  const body = req.body ?? {};
+
+  const data: { name?: string | null; phone?: string } = {};
+
+  if (body.name !== undefined) {
+    const name = String(body.name).trim();
+    if (name.length === 0) {
+      res.status(400).json({ error: "Name can't be empty." });
+      return;
+    }
+    data.name = name;
+  }
+
+  if (body.phone !== undefined && String(body.phone).trim() !== "") {
+    const phone = normalizeIndianPhone(body.phone);
+    if (!phone) {
+      res.status(400).json({ error: "Enter a valid 10-digit Indian mobile number." });
+      return;
+    }
+    data.phone = phone;
+  }
+
+  if (Object.keys(data).length === 0) {
+    res.status(400).json({ error: "Nothing to update." });
+    return;
+  }
+
+  try {
+    const user = await prisma.user.update({
+      where: { id: userId },
+      data,
+      include: { accounts: { select: { provider: true } } },
+    });
+    res.json({ user: serializeSessionUser(user) });
+  } catch (err: any) {
+    // P2002 = unique constraint (another account already uses this phone).
+    if (err?.code === "P2002") {
+      res.status(409).json({ error: "That mobile number is already linked to another account." });
+      return;
+    }
+    console.error("PATCH /me failed", err);
+    res.status(500).json({ error: "Could not update your profile. Please try again." });
   }
 });
 

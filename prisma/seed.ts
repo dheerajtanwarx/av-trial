@@ -281,7 +281,7 @@ async function main() {
         reviewCount: p.reviewCount,
         isBestseller: p.isBestseller,
         sizes: DEFAULT_SIZES,
-        pdpOverride: p.pdpOverride ?? undefined,
+        pdpOverride: (p.pdpOverride ?? undefined) as any,
       },
     });
     productBySlug[p.slug] = product.id;
@@ -425,7 +425,7 @@ async function main() {
 main()
   .catch((e) => {
     console.error(e);
-    process.exit(1);
+    (globalThis as any).process?.exit?.(1);
   })
   .finally(async () => {
     await prisma.$disconnect();

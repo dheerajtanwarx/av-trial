@@ -22,7 +22,40 @@ const SHIPPING: Record<string, { fee: number; days: number }> = {
 
 const orderNo = (id: number) => "AVC-" + String(id).padStart(6, "0");
 
+/** Parse a human order number ("AVC-000024" / "avc-24" / "24") back to its id. */
+function parseOrderNo(raw: unknown): number | null {
+  if (typeof raw !== "string") return null;
+  const digits = raw.replace(/\D/g, "");
+  if (!digits) return null;
+  const n = Number(digits);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
 type IncomingItem = { slug?: string; color?: string; size?: string; qty?: number };
+
+/* POST /api/orders/track — public order lookup by order number + email.
+   No auth: the email acts as the shared secret. Matches against the buyer's
+   account email (set for Google + guest checkouts). */
+router.post(
+  "/track",
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = parseOrderNo(req.body?.orderNo);
+    const email = String(req.body?.email ?? "").trim().toLowerCase();
+    if (!id || !isEmail(email)) {
+      res.status(400).json({ error: "Enter a valid order ID and email." });
+      return;
+    }
+    const order = await prisma.order.findUnique({
+      where: { id },
+      include: { ...orderInclude, user: { select: { email: true } } },
+    });
+    if (!order || (order.user.email ?? "").toLowerCase() !== email) {
+      res.status(404).json({ error: "No order found for that ID and email." });
+      return;
+    }
+    res.json(serializeOrder(order));
+  })
+);
 
 /* POST /api/orders — guest or authenticated checkout. */
 router.post(
@@ -203,13 +236,21 @@ router.post(
   })
 );
 
+const RETURN_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
 /* Shape an order row for the read endpoints. */
 function serializeOrder(o: any) {
+  const returnEligibleUntil =
+    o.status === "DELIVERED"
+      ? new Date(new Date(o.updatedAt).getTime() + RETURN_WINDOW_MS).toISOString()
+      : null;
+
   return {
     no: orderNo(o.id),
     id: o.id,
     status: o.status,
     placedAt: o.placedAt,
+    returnEligibleUntil,
     subtotal: toNumber(o.totalAmount),
     discount: toNumber(o.discount),
     shippingFee: toNumber(o.shippingFee),
@@ -219,6 +260,7 @@ function serializeOrder(o: any) {
     address: o.address,
     payment: o.payments?.[0]?.method ?? null,
     items: (o.items ?? []).map((it: any) => ({
+      productId: it.variant.product.id,
       name: it.variant.product.name,
       slug: it.variant.product.slug,
       color: it.variant.color,
@@ -283,6 +325,107 @@ router.get(
       return;
     }
     res.json(serializeOrder(order));
+  })
+);
+
+/* PATCH /api/orders/:id/cancel — cancel if still PLACED or CONFIRMED */
+router.patch(
+  "/:id/cancel",
+  requireAuth,
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: "Invalid order id" });
+      return;
+    }
+    const order = await prisma.order.findUnique({ where: { id } });
+    if (!order || order.userId !== Number(req.currentUser!.id)) {
+      res.status(404).json({ error: "Order not found" });
+      return;
+    }
+    if (!["PLACED", "CONFIRMED"].includes(order.status)) {
+      res.status(400).json({ error: "This order can no longer be cancelled" });
+      return;
+    }
+    const updated = await prisma.order.update({
+      where: { id },
+      data: { status: "CANCELLED" },
+      include: orderInclude,
+    });
+    res.json(serializeOrder(updated));
+  })
+);
+
+/* PATCH /api/orders/:id/return — request a return within 7 days of delivery */
+router.patch(
+  "/:id/return",
+  requireAuth,
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: "Invalid order id" });
+      return;
+    }
+    const order = await prisma.order.findUnique({ where: { id } });
+    if (!order || order.userId !== Number(req.currentUser!.id)) {
+      res.status(404).json({ error: "Order not found" });
+      return;
+    }
+    if (order.status !== "DELIVERED") {
+      res.status(400).json({ error: "Only delivered orders can be returned" });
+      return;
+    }
+    const deadline = new Date(new Date(order.updatedAt).getTime() + RETURN_WINDOW_MS);
+    if (new Date() > deadline) {
+      res.status(400).json({ error: "Return window has closed. Returns must be requested within 7 days of delivery." });
+      return;
+    }
+    const reason = req.body?.reason ? String(req.body.reason) : null;
+    const updated = await prisma.order.update({
+      where: { id },
+      data: { status: "RETURNED", notes: reason ?? order.notes },
+      include: orderInclude,
+    });
+    res.json(serializeOrder(updated));
+  })
+);
+
+/* PATCH /api/orders/:id/advance — DEV ONLY. Moves an order one step along the
+   fulfilment path (PLACED → CONFIRMED → PROCESSING → SHIPPED → DELIVERED) so the
+   return + review flows (which require a DELIVERED order) can be tested end-to-end
+   without an admin panel. Disabled in production. */
+const FULFILMENT_FLOW = ["PLACED", "CONFIRMED", "PROCESSING", "SHIPPED", "DELIVERED"];
+
+router.patch(
+  "/:id/advance",
+  requireAuth,
+  asyncHandler(async (req: Request, res: Response) => {
+    if (process.env.NODE_ENV === "production") {
+      res.status(403).json({ error: "Not available" });
+      return;
+    }
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: "Invalid order id" });
+      return;
+    }
+    const order = await prisma.order.findUnique({ where: { id } });
+    if (!order || order.userId !== Number(req.currentUser!.id)) {
+      res.status(404).json({ error: "Order not found" });
+      return;
+    }
+    const idx = FULFILMENT_FLOW.indexOf(order.status);
+    if (idx === -1 || idx === FULFILMENT_FLOW.length - 1) {
+      res.status(400).json({ error: `Order can't be advanced from ${order.status}` });
+      return;
+    }
+    const next = FULFILMENT_FLOW[idx + 1] as typeof order.status;
+    const updated = await prisma.order.update({
+      where: { id },
+      data: { status: next },
+      include: orderInclude,
+    });
+    res.json(serializeOrder(updated));
   })
 );
 
