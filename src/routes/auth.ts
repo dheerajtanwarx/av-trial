@@ -11,10 +11,15 @@ const JWT_SECRET = process.env.JWT_SECRET!;
 const FRONTEND_URL = process.env.FRONTEND_URL ?? "http://localhost:3000";
 const COOKIE_NAME = "av_token";
 
+// Frontend (Vercel) and backend (Render) are on different sites, so the auth
+// cookie must be SameSite=None + Secure in production for the browser to send
+// it on cross-site API requests. Locally we keep Lax over http.
+const isProd = process.env.NODE_ENV === "production";
+
 const COOKIE_OPTIONS = {
   httpOnly: true,
-  secure: process.env.NODE_ENV === "production",
-  sameSite: "lax" as const,
+  secure: isProd,
+  sameSite: isProd ? ("none" as const) : ("lax" as const),
   maxAge: 7 * 24 * 60 * 60 * 1000,
 };
 
@@ -172,7 +177,11 @@ router.patch("/me", requireAuth, async (req: Request, res: Response) => {
 });
 
 router.post("/logout", (_req: Request, res: Response) => {
-  res.clearCookie(COOKIE_NAME, { httpOnly: true, sameSite: "lax" });
+  res.clearCookie(COOKIE_NAME, {
+    httpOnly: COOKIE_OPTIONS.httpOnly,
+    secure: COOKIE_OPTIONS.secure,
+    sameSite: COOKIE_OPTIONS.sameSite,
+  });
   res.json({ success: true });
 });
 
