@@ -26,6 +26,9 @@ export type ProductCard = {
   main: string;
   alt: string;
   soldOut?: boolean;
+  /** Total units across all variants — only set when variants were loaded.
+      Lets the storefront show an "Only N left" cue on the card. */
+  stock?: number;
 };
 
 /** Render a star string like "★★★★★" / "★★★★☆" from a numeric rating. */
@@ -52,12 +55,14 @@ export function serializeProductCard(p: ProductWithImages): ProductCard {
     flag = { label: p.badge };
   }
 
-  // Sold out only when variants were loaded and none has stock; products
-  // queried without variants (or with no variants yet) stay purchasable.
-  const soldOut =
-    Array.isArray(p.variants) &&
-    p.variants.length > 0 &&
-    p.variants.every((v) => v.stockQty <= 0);
+  // Stock is the sum of variant quantities — but only when variants were
+  // loaded. Products queried without variants (or with none yet) leave `stock`
+  // undefined and stay purchasable; the card shows no stock cue for them.
+  const hasVariants = Array.isArray(p.variants) && p.variants.length > 0;
+  const stock = hasVariants
+    ? p.variants!.reduce((s, v) => s + Math.max(0, v.stockQty), 0)
+    : undefined;
+  const soldOut = hasVariants && stock === 0;
 
   return {
     slug: p.slug,
@@ -70,5 +75,6 @@ export function serializeProductCard(p: ProductWithImages): ProductCard {
     main: imgs[0]?.imageUrl ?? "",
     alt: imgs[1]?.imageUrl ?? imgs[0]?.imageUrl ?? "",
     soldOut: soldOut || undefined,
+    stock,
   };
 }

@@ -18,6 +18,13 @@ const imageInclude = {
   orderBy: { sortOrder: "asc" },
 } as const;
 
+// PDP needs to know which variant each image belongs to so the gallery can
+// swap with the selected colour; the listing/related queries don't.
+const pdpImageInclude = {
+  select: { imageUrl: true, sortOrder: true, isPrimary: true, variantId: true },
+  orderBy: { sortOrder: "asc" },
+} as const;
+
 /** Split a comma-separated query param into a trimmed, de-duped list. */
 function splitCsv(raw: unknown): string[] {
   if (typeof raw !== "string") return [];
@@ -206,7 +213,7 @@ router.get(
     const product = await prisma.product.findUnique({
       where: { slug: String(req.params.slug) },
       include: {
-        images: imageInclude,
+        images: pdpImageInclude,
         variants: { orderBy: { id: "asc" } },
       },
     });
@@ -256,14 +263,37 @@ router.get(
         };
       });
 
+    // Group images by the variant they belong to. Images with no variantId are
+    // "shared" product shots used as a fallback for colours that have none of
+    // their own. Rows arrive pre-sorted by sortOrder from the query.
+    const imagesByVariant = new Map<number, string[]>();
+    const sharedImages: string[] = [];
+    for (const im of product.images) {
+      if (im.variantId == null) {
+        sharedImages.push(im.imageUrl);
+      } else {
+        const list = imagesByVariant.get(im.variantId) ?? [];
+        list.push(im.imageUrl);
+        imagesByVariant.set(im.variantId, list);
+      }
+    }
+    const allImages = product.images.map((i: typeof product.images[number]) => i.imageUrl);
+
     const pdp = buildPdp({
       product,
-      images: product.images.map((i: typeof product.images[number]) => i.imageUrl),
-      colors: product.variants.map((v: typeof product.variants[number]) => ({
-        name: v.color,
-        hex: v.colorHex,
-        stock: v.stockQty,
-      })),
+      images: allImages,
+      colors: product.variants.map((v: typeof product.variants[number]) => {
+        const own = imagesByVariant.get(v.id) ?? [];
+        // Variant's own images → shared product shots → every image, so a
+        // colour always resolves to a non-empty gallery when any exist.
+        const images = own.length ? own : sharedImages.length ? sharedImages : allImages;
+        return {
+          name: v.color,
+          hex: v.colorHex,
+          stock: v.stockQty,
+          images,
+        };
+      }),
       reviews,
       reviewDist: buildReviewDist(reviewRows.map((r) => r.rating)),
       related,
