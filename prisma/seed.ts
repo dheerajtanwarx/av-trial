@@ -45,15 +45,6 @@ const CATEGORIES = [
   { name: "Designer Saree", slug: "designer-saree" },
   { name: "Suit Sets", slug: "suit-sets" },
   { name: "Dupatta", slug: "dupatta" },
-  { name: "Accessories", slug: "accessories" },
-];
-
-/* "Complete the look" cross-sell accessories (ported from CROSS_SELL in
-   cart-data.ts). Seeded as real products so they can be checked out. */
-const ACCESSORIES = [
-  { slug: "jhumka", name: "Polki Jhumka Set", type: "Temple · 22k Gold-plate", price: 3200, color: { name: "Gold", hex: "#bd8f3c" }, image: "premium_photo-1682096034925-468c545d1c12" },
-  { slug: "juttis", name: "Zari Embroidered Juttis", type: "Handcrafted · Velvet", price: 2400, color: { name: "Maroon", hex: "#6e1f2e" }, image: "premium_photo-1682096037844-e43413e887a8" },
-  { slug: "potli", name: "Silk Potli Clutch", type: "Gota Patti · Raw Silk", price: 1900, color: { name: "Rani Pink", hex: "#bd3c6e" }, image: "premium_photo-1682096048114-4b36a3212527" },
 ];
 
 /* ---- Products (odhniEdit + bestsellers) ---- */
@@ -312,33 +303,6 @@ async function main() {
         },
       });
     }
-  }
-
-  console.log("Seeding accessories (cross-sell)…");
-  for (const a of ACCESSORIES) {
-    const product = await prisma.product.create({
-      data: {
-        categoryId: categoryBySlug["accessories"],
-        name: a.name,
-        slug: a.slug,
-        type: a.type,
-        basePrice: a.price,
-        rating: 4.8,
-        reviewCount: 40,
-        sizes: ["One Size"],
-        variants: {
-          create: {
-            color: a.color.name,
-            colorHex: a.color.hex,
-            price: a.price,
-            stockQty: 50,
-            sku: `${a.slug}-${a.color.name.toLowerCase()}`,
-          },
-        },
-        images: { create: { imageUrl: img(a.image, 700), isPrimary: true, sortOrder: 0 } },
-      },
-    });
-    productBySlug[a.slug] = product.id;
   }
 
   console.log("Seeding promos…");
