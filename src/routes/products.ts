@@ -9,7 +9,7 @@ import {
   PdpReview,
   RelatedItem,
 } from "../lib/pdp";
-import { Product, ProductImage, ProductVariant, Review } from "../../generated/prisma/client";
+import { Prisma, Product, ProductImage, ProductVariant, Review } from "../../generated/prisma/client";
 
 const router = Router();
 
@@ -18,26 +18,153 @@ const imageInclude = {
   orderBy: { sortOrder: "asc" },
 } as const;
 
-/* GET /api/products?category=<slug>&bestseller=true — landing Product cards. */
+/** Split a comma-separated query param into a trimmed, de-duped list. */
+function splitCsv(raw: unknown): string[] {
+  if (typeof raw !== "string") return [];
+  return [...new Set(raw.split(",").map((s) => s.trim()).filter(Boolean))];
+}
+
+/** Break a product `type` string ("Bandhej · Pure Georgette") into tag tokens. */
+function tagsFromType(type: string | null | undefined): string[] {
+  if (!type) return [];
+  return type
+    .split(/[·&,/|]/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+}
+
+type SortKey = "featured" | "price-asc" | "price-desc" | "newest" | "rating";
+
+const ORDER_BY: Record<SortKey, Prisma.ProductOrderByWithRelationInput> = {
+  featured: { createdAt: "asc" },
+  "price-asc": { basePrice: "asc" },
+  "price-desc": { basePrice: "desc" },
+  newest: { createdAt: "desc" },
+  rating: { rating: "desc" },
+};
+
+/* GET /api/products
+   Search + filter across the whole catalogue. All params optional:
+     q          full-text across name, type, description, badge, category name
+     category   one or more category slugs (comma-separated)
+     tag        one or more tag tokens, matched within a product's `type`
+     bestseller "true" — bestsellers only
+     sale       "true" — on-sale only (comparePrice > basePrice)
+     minPrice   lower bound on basePrice
+     maxPrice   upper bound on basePrice
+     sort       featured | price-asc | price-desc | newest | rating */
 router.get(
   "/",
   asyncHandler(async (req: Request, res: Response) => {
-    const category = req.query.category;
-    const bestseller = req.query.bestseller;
+    const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    const slugs = splitCsv(req.query.category);
+    const tags = splitCsv(req.query.tag);
+    const bestseller = req.query.bestseller === "true";
+    const sale = req.query.sale === "true";
+    const sort = (req.query.sort as SortKey) || "featured";
 
-    const products = await prisma.product.findMany({
-      where: {
-        isActive: true,
-        ...(typeof category === "string"
-          ? { category: { slug: category } }
-          : {}),
-        ...(bestseller === "true" ? { isBestseller: true } : {}),
+    const and: Prisma.ProductWhereInput[] = [];
+
+    if (q) {
+      and.push({
+        OR: [
+          { name: { contains: q } },
+          { type: { contains: q } },
+          { description: { contains: q } },
+          { badge: { contains: q } },
+          { category: { name: { contains: q } } },
+        ],
+      });
+    }
+
+    // Tag tokens live inside the free-text `type` column; match any selected tag.
+    if (tags.length > 0) {
+      and.push({ OR: tags.map((t) => ({ type: { contains: t } })) });
+    }
+
+    const price: Prisma.DecimalFilter = {};
+    const min = Number(req.query.minPrice);
+    const max = Number(req.query.maxPrice);
+    if (req.query.minPrice !== undefined && Number.isFinite(min)) price.gte = min;
+    if (req.query.maxPrice !== undefined && Number.isFinite(max)) price.lte = max;
+
+    const where: Prisma.ProductWhereInput = {
+      isActive: true,
+      ...(slugs.length === 1
+        ? { category: { slug: slugs[0] } }
+        : slugs.length > 1
+        ? { category: { slug: { in: slugs } } }
+        : {}),
+      ...(bestseller ? { isBestseller: true } : {}),
+      ...(Object.keys(price).length ? { basePrice: price } : {}),
+      ...(and.length ? { AND: and } : {}),
+    };
+
+    let products = await prisma.product.findMany({
+      where,
+      include: {
+        images: imageInclude,
+        variants: { select: { stockQty: true } },
+        category: { select: { name: true, slug: true } },
       },
-      include: { images: imageInclude, variants: { select: { stockQty: true } } },
-      orderBy: { createdAt: "asc" },
+      orderBy: ORDER_BY[sort] ?? ORDER_BY.featured,
     });
 
+    // On-sale is a column-vs-column comparison Prisma can't express in `where`.
+    if (sale) {
+      products = products.filter(
+        (p) => p.comparePrice != null && toNumber(p.comparePrice) > toNumber(p.basePrice)
+      );
+    }
+
     res.json(products.map(serializeProductCard));
+  })
+);
+
+/* GET /api/products/facets — filter options for the search/listing UI. */
+router.get(
+  "/facets",
+  asyncHandler(async (_req: Request, res: Response) => {
+    const [grouped, types, agg] = await Promise.all([
+      prisma.product.groupBy({
+        by: ["categoryId"],
+        where: { isActive: true },
+        _count: { _all: true },
+      }),
+      prisma.product.findMany({
+        where: { isActive: true, type: { not: null } },
+        select: { type: true },
+        distinct: ["type"],
+      }),
+      prisma.product.aggregate({
+        where: { isActive: true },
+        _min: { basePrice: true },
+        _max: { basePrice: true },
+      }),
+    ]);
+
+    const countByCat = new Map(grouped.map((g) => [g.categoryId, g._count._all]));
+    const cats = await prisma.category.findMany({
+      where: { id: { in: [...countByCat.keys()] } },
+      select: { id: true, name: true, slug: true },
+      orderBy: { name: "asc" },
+    });
+
+    const tagSet = new Set<string>();
+    for (const t of types) for (const tag of tagsFromType(t.type)) tagSet.add(tag);
+
+    res.json({
+      categories: cats.map((c) => ({
+        name: c.name,
+        slug: c.slug,
+        count: countByCat.get(c.id) ?? 0,
+      })),
+      tags: [...tagSet].sort((a, b) => a.localeCompare(b)),
+      priceRange: {
+        min: Math.floor(toNumber(agg._min.basePrice ?? 0)),
+        max: Math.ceil(toNumber(agg._max.basePrice ?? 0)),
+      },
+    });
   })
 );
 
