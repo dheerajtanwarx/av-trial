@@ -12,8 +12,10 @@ type ProductWithImages = {
   badge: string | null;
   rating: number | null;
   images: { imageUrl: string; sortOrder: number; isPrimary: boolean }[];
-  variants?: { stockQty: number }[];
+  variants?: { stockQty: number; color?: string; colorHex?: string }[];
 };
+
+export type ProductCardColor = { name: string; hex: string; stock: number };
 
 export type ProductCard = {
   slug: string;
@@ -29,6 +31,10 @@ export type ProductCard = {
   /** Total units across all variants — only set when variants were loaded.
       Lets the storefront show an "Only N left" cue on the card. */
   stock?: number;
+  /** Per-colour stock — only set when the variant colours were loaded. Lets the
+      card flag partial sell-outs and quick-add an in-stock colour rather than a
+      hardcoded one. */
+  colors?: ProductCardColor[];
 };
 
 /** Render a star string like "★★★★★" / "★★★★☆" from a numeric rating. */
@@ -64,6 +70,21 @@ export function serializeProductCard(p: ProductWithImages): ProductCard {
     : undefined;
   const soldOut = hasVariants && stock === 0;
 
+  // Per-colour stock — only when the variants were loaded *with* their colour.
+  // A colour can repeat across size variants, so quantities are summed per
+  // colour name to give one stock figure per swatch.
+  const colors = hasVariants && p.variants!.some((v) => v.color)
+    ? Object.values(
+        p.variants!.reduce<Record<string, ProductCardColor>>((acc, v) => {
+          if (!v.color) return acc;
+          const key = v.color.toLowerCase();
+          if (!acc[key]) acc[key] = { name: v.color, hex: v.colorHex ?? "#bd3c6e", stock: 0 };
+          acc[key].stock += Math.max(0, v.stockQty);
+          return acc;
+        }, {})
+      )
+    : undefined;
+
   return {
     slug: p.slug,
     name: p.name,
@@ -76,5 +97,6 @@ export function serializeProductCard(p: ProductWithImages): ProductCard {
     alt: imgs[1]?.imageUrl ?? imgs[0]?.imageUrl ?? "",
     soldOut: soldOut || undefined,
     stock,
+    colors,
   };
 }

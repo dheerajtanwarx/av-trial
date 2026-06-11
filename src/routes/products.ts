@@ -111,7 +111,7 @@ router.get(
       where,
       include: {
         images: imageInclude,
-        variants: { select: { stockQty: true } },
+        variants: { select: { stockQty: true, color: true, colorHex: true } },
         category: { select: { name: true, slug: true } },
       },
       orderBy: ORDER_BY[sort] ?? ORDER_BY.featured,
@@ -172,6 +172,54 @@ router.get(
         max: Math.ceil(toNumber(agg._max.basePrice ?? 0)),
       },
     });
+  })
+);
+
+/* POST /api/products/stock — live stock for a set of { slug, color } lines.
+   Public (no auth) so guest carts can revalidate too. Used by the cart to flag
+   items that have sold out since they were added. Returns one row per input
+   line with its current per-variant stock (0 if the product/colour is gone). */
+router.post(
+  "/stock",
+  asyncHandler(async (req: Request, res: Response) => {
+    const rawItems = Array.isArray(req.body?.items) ? req.body.items : [];
+    const items: { slug: string; color: string }[] = rawItems
+      .map((it: { slug?: unknown; color?: unknown }) => ({
+        slug: String(it?.slug ?? "").trim(),
+        color: it?.color != null ? String(it.color).trim() : "",
+      }))
+      .filter((it: { slug: string }) => it.slug !== "")
+      .slice(0, 100);
+
+    if (items.length === 0) {
+      res.json({ items: [] });
+      return;
+    }
+
+    // One query for every referenced product, then resolve each line in memory.
+    const slugs: string[] = [...new Set(items.map((it) => it.slug))];
+    const products = await prisma.product.findMany({
+      where: { slug: { in: slugs } },
+      select: {
+        slug: true,
+        isActive: true,
+        variants: { select: { color: true, stockQty: true }, orderBy: { id: "asc" } },
+      },
+    });
+    const bySlug = new Map(products.map((p) => [p.slug, p]));
+
+    const result = items.map((it) => {
+      const product = bySlug.get(it.slug);
+      if (!product || !product.isActive || product.variants.length === 0) {
+        return { slug: it.slug, color: it.color, stock: 0 };
+      }
+      const variant =
+        product.variants.find((v) => v.color.toLowerCase() === it.color.toLowerCase()) ??
+        product.variants[0];
+      return { slug: it.slug, color: it.color, stock: Math.max(0, variant.stockQty) };
+    });
+
+    res.json({ items: result });
   })
 );
 

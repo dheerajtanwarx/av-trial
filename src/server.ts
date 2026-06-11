@@ -18,6 +18,7 @@ import adminRouter from "./routes/admin";
 import adminProductsRouter from "./routes/adminProducts";
 import inventoryRouter from "./routes/inventory";
 import customersRouter from "./routes/customers";
+import reportsRouter from "./routes/reports";
 import settingsRouter from "./routes/settings";
 
 const app = express();
@@ -52,6 +53,7 @@ app.use("/api/reviews", reviewsRouter);
 app.use("/api/admin/products", adminProductsRouter);
 app.use("/api/admin/inventory", inventoryRouter);
 app.use("/api/admin/customers", customersRouter);
+app.use("/api/admin/reports", reportsRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/settings", settingsRouter);
 

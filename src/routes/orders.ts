@@ -4,6 +4,7 @@ import { asyncHandler, isEmail } from "../lib/http";
 import { toNumber, inr } from "../lib/money";
 import { requireAuth, optionalAuth, requireAdmin } from "../middleware/authMiddleware";
 import { PaymentMethod, PaymentStatus, OrderStatus } from "../../generated/prisma/client";
+import { buildInvoicePdf } from "../lib/invoice";
 
 const router = Router();
 
@@ -629,6 +630,42 @@ router.get(
       return;
     }
     res.json(serializeOrder(order));
+  })
+);
+
+/* GET /api/orders/:id/invoice — downloadable PDF invoice for a delivered order
+   (ownership-checked). An invoice is only issued once the order is DELIVERED. */
+router.get(
+  "/:id/invoice",
+  requireAuth,
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: "Invalid order id" });
+      return;
+    }
+    const order = await prisma.order.findUnique({
+      where: { id },
+      include: { ...orderInclude, user: { select: { name: true, email: true } } },
+    });
+    if (!order || order.userId !== Number(req.currentUser!.id)) {
+      res.status(404).json({ error: "Order not found" });
+      return;
+    }
+    if (order.status !== "DELIVERED") {
+      res.status(400).json({ error: "An invoice is available once your order is delivered." });
+      return;
+    }
+
+    const serialized = serializeOrder(order);
+    const pdf = await buildInvoicePdf({
+      ...serialized,
+      customer: { name: order.user?.name ?? null, email: order.user?.email ?? null },
+    });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="Invoice-${serialized.no}.pdf"`);
+    res.send(pdf);
   })
 );
 
