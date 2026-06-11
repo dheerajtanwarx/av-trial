@@ -16,6 +16,7 @@ import addressesRouter from "./routes/addresses";
 import reviewsRouter from "./routes/reviews";
 import adminRouter from "./routes/admin";
 import adminProductsRouter from "./routes/adminProducts";
+import inventoryRouter from "./routes/inventory";
 import settingsRouter from "./routes/settings";
 
 const app = express();
@@ -48,6 +49,7 @@ app.use("/api/wishlist", wishlistRouter);
 app.use("/api/addresses", addressesRouter);
 app.use("/api/reviews", reviewsRouter);
 app.use("/api/admin/products", adminProductsRouter);
+app.use("/api/admin/inventory", inventoryRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/settings", settingsRouter);
 
