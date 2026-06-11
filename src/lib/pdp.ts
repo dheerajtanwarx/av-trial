@@ -188,6 +188,15 @@ export function buildPdp(input: BuildInput): PdpProduct {
 
   const heroImage = input.images[0] ?? "";
 
+  // Rating + count come from the real approved reviews passed in — never the
+  // seeded `rating`/`reviewCount` columns, which carry placeholder values. No
+  // reviews → 0 (the header renders a "no reviews yet" state instead of stars).
+  const reviewCount = input.reviews.length;
+  const rating =
+    reviewCount > 0
+      ? Math.round((input.reviews.reduce((s, r) => s + r.stars, 0) / reviewCount) * 10) / 10
+      : 0;
+
   const pdp: PdpProduct = {
     slug: p.slug,
     name: p.name,
@@ -196,8 +205,8 @@ export function buildPdp(input: BuildInput): PdpProduct {
     eyebrow: navHot === "Lehenga" ? "The Atelier" : `${navHot} · The Atelier`,
     craft: type,
     galleryFlag: p.badge ?? undefined,
-    rating: p.rating ?? 4.8,
-    reviewCount: p.reviewCount ?? input.reviews.length,
+    rating,
+    reviewCount,
     price: inr(base),
     was: hasWas ? inr(was) : undefined,
     off,

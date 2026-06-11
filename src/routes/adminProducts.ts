@@ -58,8 +58,32 @@ type ParsedProduct = {
   isActive: boolean;
   sizes: string[] | null;
   variants: ParsedVariant[];
-  images: { imageUrl: string; isPrimary: boolean; sortOrder: number }[];
+  images: { imageUrl: string; isPrimary: boolean; sortOrder: number; variantColor: string | null }[];
 };
+
+/** Build a case-insensitive colour → variantId lookup for a product's current
+    variants. Used to resolve an image's `variantColor` to the row it belongs
+    to once the variants have been persisted. */
+async function variantColorMap(
+  tx: Prisma.TransactionClient,
+  productId: number
+): Promise<Map<string, number>> {
+  const rows = await tx.productVariant.findMany({
+    where: { productId },
+    select: { id: true, color: true },
+  });
+  return new Map(rows.map((v) => [v.color.trim().toLowerCase(), v.id]));
+}
+
+/** Resolve an image's colour label to a variantId; unknown/blank → null (the
+    image stays a shared product shot shown for every colour). */
+function resolveVariantId(
+  variantColor: string | null,
+  colorToVariant: Map<string, number>
+): number | null {
+  if (!variantColor) return null;
+  return colorToVariant.get(variantColor.trim().toLowerCase()) ?? null;
+}
 
 /** Validate + normalise a create/update body. Returns either field errors or
     the clean parsed product. Shared by POST and PUT. */
@@ -125,12 +149,21 @@ async function parseProductBody(
     });
   });
 
-  // Images — array of { imageUrl } or plain url strings. First image is primary.
+  // Images — array of { imageUrl, variantColor? } or plain url strings. First
+  // image is primary. `variantColor` (when present) ties the shot to a colour
+  // so the PDP gallery can swap per swatch; it's resolved to a variantId after
+  // the variants are persisted. A blank/absent colour means "all colours".
   const rawImages: any[] = Array.isArray(body?.images) ? body.images : [];
   const images = rawImages
-    .map((im: any) => (typeof im === "string" ? im : String(im?.imageUrl ?? "")).trim())
-    .filter((url: string) => url.length > 0)
-    .map((imageUrl: string, i: number) => ({ imageUrl, isPrimary: i === 0, sortOrder: i }));
+    .map((im: any) => ({
+      imageUrl: (typeof im === "string" ? im : String(im?.imageUrl ?? "")).trim(),
+      variantColor:
+        typeof im === "object" && im?.variantColor
+          ? String(im.variantColor).trim() || null
+          : null,
+    }))
+    .filter((im) => im.imageUrl.length > 0)
+    .map((im, i: number) => ({ ...im, isPrimary: i === 0, sortOrder: i }));
 
   let sizes: string[] | null = null;
   if (Array.isArray(body?.sizes)) {
@@ -195,6 +228,7 @@ function serializeDetail(p: any) {
       imageUrl: im.imageUrl,
       isPrimary: im.isPrimary,
       sortOrder: im.sortOrder,
+      variantId: im.variantId ?? null,
     })),
   };
 }
@@ -327,12 +361,14 @@ router.post(
           });
         }
         if (d.images.length > 0) {
+          const colorToVariant = await variantColorMap(tx, product.id);
           await tx.productImage.createMany({
             data: d.images.map((im) => ({
               productId: product.id,
               imageUrl: im.imageUrl,
               isPrimary: im.isPrimary,
               sortOrder: im.sortOrder,
+              variantId: resolveVariantId(im.variantColor, colorToVariant),
             })),
           });
         }
@@ -432,15 +468,18 @@ router.put(
           }
         }
 
-        // Replace the product-level image gallery.
+        // Replace the product-level image gallery. Re-resolve colour→variantId
+        // against the now-current variants so per-colour links survive the edit.
         await tx.productImage.deleteMany({ where: { productId: id } });
         if (d.images.length > 0) {
+          const colorToVariant = await variantColorMap(tx, id);
           await tx.productImage.createMany({
             data: d.images.map((im) => ({
               productId: id,
               imageUrl: im.imageUrl,
               isPrimary: im.isPrimary,
               sortOrder: im.sortOrder,
+              variantId: resolveVariantId(im.variantColor, colorToVariant),
             })),
           });
         }
