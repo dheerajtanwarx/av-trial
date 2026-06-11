@@ -33,6 +33,16 @@ function parseOrderNo(raw: unknown): number | null {
 
 type IncomingItem = { slug?: string; color?: string; size?: string; qty?: number };
 
+type ResolvedItem = {
+  variantId: number;
+  size: string | null;
+  qty: number;
+  unitPrice: number;
+  stockQty: number;
+  name: string;
+  color: string;
+};
+
 /** Thrown inside the order transaction when a conditional stock decrement
     matches no row (someone else bought the last units mid-checkout). */
 class OutOfStockError extends Error {
@@ -121,15 +131,7 @@ router.post(
     const shipping = SHIPPING[deliveryId] ?? SHIPPING.standard;
 
     // Resolve each cart line to a concrete ProductVariant.
-    const resolved: {
-      variantId: number;
-      size: string | null;
-      qty: number;
-      unitPrice: number;
-      stockQty: number;
-      name: string;
-      color: string;
-    }[] = [];
+    const resolved: ResolvedItem[] = [];
     for (const it of items) {
       const qty = Math.max(1, Number(it.qty ?? 1));
       const product = await prisma.product.findUnique({
@@ -165,7 +167,7 @@ router.post(
     }
     const shortages = [...needByVariant.entries()]
       .map(([variantId, need]) => {
-        const line = resolved.find((r) => r.variantId === variantId)!;
+        const line = resolved.find((r: ResolvedItem) => r.variantId === variantId)!;
         return { name: line.name, color: line.color, available: line.stockQty, requested: need };
       })
       .filter((s) => s.requested > s.available);
@@ -239,34 +241,34 @@ router.post(
         });
 
         const created = await tx.order.create({
-          data: {
-            userId,
-            addressId: addr.id,
-            totalAmount: subtotal,
-            discount,
-            finalAmount,
-            shippingMethod: deliveryId,
-            shippingFee: shipping.fee,
-            status: "PLACED",
-            items: {
-              create: resolved.map((r) => ({
-                variantId: r.variantId,
-                size: r.size,
-                quantity: r.qty,
-                unitPrice: r.unitPrice,
-                totalPrice: r.unitPrice * r.qty,
-              })),
-            },
-            payments: {
-              create: {
-                method,
-                status: paymentStatus,
-                amount: finalAmount,
-                gateway: "mock",
-                paidAt: paymentStatus === "SUCCESS" ? new Date() : null,
+            data: {
+              userId,
+              addressId: addr.id,
+              totalAmount: subtotal,
+              discount,
+              finalAmount,
+              shippingMethod: deliveryId,
+              shippingFee: shipping.fee,
+              status: "PLACED",
+              items: {
+                create: resolved.map((r: ResolvedItem) => ({
+                  variantId: r.variantId,
+                  size: r.size,
+                  quantity: r.qty,
+                  unitPrice: r.unitPrice,
+                  totalPrice: r.unitPrice * r.qty,
+                })),
+              },
+              payments: {
+                create: {
+                  method,
+                  status: paymentStatus,
+                  amount: finalAmount,
+                  gateway: "mock",
+                  paidAt: paymentStatus === "SUCCESS" ? new Date() : null,
+                },
               },
             },
-          },
         });
 
         // Clear the purchased lines from the user's server cart. This runs inside

@@ -9,6 +9,7 @@ import {
   PdpReview,
   RelatedItem,
 } from "../lib/pdp";
+import { Product, ProductImage, ProductVariant, Review } from "../../generated/prisma/client";
 
 const router = Router();
 
@@ -59,7 +60,7 @@ router.get(
       orderBy: { createdAt: "desc" },
     });
 
-    const reviews: PdpReview[] = rows.map((r) => ({
+    const reviews: PdpReview[] = rows.map((r: typeof rows[number]) => ({
       stars: r.rating,
       txt: r.comment ?? "",
       name: r.user.name ?? "Verified Buyer",
@@ -92,7 +93,7 @@ router.get(
       include: { user: { select: { name: true } } },
       orderBy: { createdAt: "desc" },
     });
-    const reviews: PdpReview[] = reviewRows.map((r) => ({
+    const reviews: PdpReview[] = reviewRows.map((r: typeof reviewRows[number]) => ({
       stars: r.rating,
       txt: r.comment ?? "",
       name: r.user.name ?? "Verified Buyer",
@@ -107,13 +108,11 @@ router.get(
       take: 8,
     });
     const related: RelatedItem[] = relatedRows
-      .sort(
-        (a, b) =>
-          Number(b.categoryId === product.categoryId) -
-          Number(a.categoryId === product.categoryId)
+      .sort((a: typeof relatedRows[number], b: typeof relatedRows[number]) =>
+        Number(b.categoryId === product.categoryId) - Number(a.categoryId === product.categoryId)
       )
       .slice(0, 4)
-      .map((r) => {
+      .map((r: typeof relatedRows[number]) => {
         const base = toNumber(r.basePrice);
         const was = toNumber(r.comparePrice);
         const isSale = was > base;
@@ -132,8 +131,8 @@ router.get(
 
     const pdp = buildPdp({
       product,
-      images: product.images.map((i) => i.imageUrl),
-      colors: product.variants.map((v) => ({
+      images: product.images.map((i: typeof product.images[number]) => i.imageUrl),
+      colors: product.variants.map((v: typeof product.variants[number]) => ({
         name: v.color,
         hex: v.colorHex,
         stock: v.stockQty,
