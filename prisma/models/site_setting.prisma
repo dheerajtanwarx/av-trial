@@ -1,0 +1,10 @@
+// Key-value store for editable site configuration (e.g. homepage hero image
+// overrides). Values are JSON so each setting can hold whatever shape it needs.
+
+model SiteSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  @@map("site_settings")
+}

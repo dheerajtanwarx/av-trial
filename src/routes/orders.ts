@@ -2,8 +2,8 @@ import { Router, Request, Response } from "express";
 import { prisma } from "../lib/prisma";
 import { asyncHandler, isEmail } from "../lib/http";
 import { toNumber, inr } from "../lib/money";
-import { requireAuth, optionalAuth } from "../middleware/authMiddleware";
-import { PaymentMethod, PaymentStatus } from "../../generated/prisma/client";
+import { requireAuth, optionalAuth, requireAdmin } from "../middleware/authMiddleware";
+import { PaymentMethod, PaymentStatus, OrderStatus } from "../../generated/prisma/client";
 
 const router = Router();
 
@@ -389,6 +389,222 @@ router.get(
       orderBy: { placedAt: "desc" },
     });
     res.json(orders.map(serializeOrder));
+  })
+);
+
+/* ============================================================
+   Admin order management (ADMIN role only)
+   ------------------------------------------------------------
+   These routes are registered BEFORE the generic "/:id" handler
+   so "/admin" isn't swallowed as an order id.
+   ============================================================ */
+
+/** The forward fulfilment path an admin drives an order along. */
+const ADMIN_STATUS_FLOW: OrderStatus[] = ["PLACED", "PROCESSING", "SHIPPED", "DELIVERED"];
+
+/** Canonical ordering used to reject backward / sideways transitions.
+    CONFIRMED is ranked between PLACED and PROCESSING so an order parked in
+    CONFIRMED (e.g. from the legacy flow) can still be moved forward. */
+const STATUS_RANK: Record<string, number> = {
+  PLACED: 0,
+  CONFIRMED: 1,
+  PROCESSING: 2,
+  SHIPPED: 3,
+  DELIVERED: 4,
+};
+
+/** The status filters the admin list understands (plus "all"). */
+const ADMIN_FILTERS: OrderStatus[] = [
+  "PLACED",
+  "CONFIRMED",
+  "PROCESSING",
+  "SHIPPED",
+  "DELIVERED",
+  "CANCELLED",
+  "RETURNED",
+];
+
+/** Detail include: everything serializeOrder needs + the customer record. */
+const adminOrderInclude = {
+  ...orderInclude,
+  user: { select: { id: true, name: true, email: true, phone: true } },
+};
+
+/** Detail payload = the shared order shape + customer block. */
+function serializeAdminOrder(o: any) {
+  return {
+    ...serializeOrder(o),
+    customer: {
+      id: o.user?.id ?? null,
+      name: o.user?.name ?? o.address?.fullName ?? null,
+      email: o.user?.email ?? null,
+      phone: o.user?.phone ?? o.address?.phone ?? null,
+    },
+  };
+}
+
+/* GET /api/orders/admin — paginated order list with search + status filter.
+   Query: q (order no / customer name / email), status (one of ADMIN_FILTERS
+   or "all"), page (1-based), pageSize. Returns rows + pagination + per-status
+   counts for the filter chips (counts honour the search but not the status). */
+router.get(
+  "/admin",
+  asyncHandler(requireAdmin),
+  asyncHandler(async (req: Request, res: Response) => {
+    const q = String(req.query.q ?? "").trim();
+    const statusRaw = String(req.query.status ?? "all").toUpperCase();
+    const status = ADMIN_FILTERS.includes(statusRaw as OrderStatus)
+      ? (statusRaw as OrderStatus)
+      : null;
+
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const pageSize = Math.min(50, Math.max(1, Number(req.query.pageSize) || 10));
+
+    // Search filter (applied to both the list and the chip counts).
+    const searchWhere: any = {};
+    if (q) {
+      const idMatch = parseOrderNo(q);
+      searchWhere.OR = [
+        { user: { name: { contains: q } } },
+        { user: { email: { contains: q } } },
+        ...(idMatch ? [{ id: idMatch }] : []),
+      ];
+    }
+
+    const where = status ? { ...searchWhere, status } : searchWhere;
+
+    const [total, rows, grouped] = await Promise.all([
+      prisma.order.count({ where }),
+      prisma.order.findMany({
+        where,
+        orderBy: { placedAt: "desc" },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        include: {
+          user: { select: { name: true, email: true } },
+          payments: { select: { method: true }, take: 1, orderBy: { id: "asc" } },
+          _count: { select: { items: true } },
+        },
+      }),
+      prisma.order.groupBy({
+        by: ["status"],
+        where: searchWhere,
+        _count: { _all: true },
+      }),
+    ]);
+
+    const counts: Record<string, number> = { all: 0 };
+    for (const f of ADMIN_FILTERS) counts[f] = 0;
+    for (const g of grouped) {
+      counts[g.status] = g._count._all;
+      counts.all += g._count._all;
+    }
+
+    res.json({
+      orders: rows.map((o) => ({
+        id: o.id,
+        no: orderNo(o.id),
+        customer: {
+          name: o.user?.name || "Guest",
+          email: o.user?.email ?? null,
+        },
+        placedAt: o.placedAt,
+        total: toNumber(o.finalAmount),
+        payment: o.payments[0]?.method ?? null,
+        status: o.status,
+        itemCount: o._count.items,
+      })),
+      counts,
+      page,
+      pageSize,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / pageSize)),
+    });
+  })
+);
+
+/* GET /api/orders/admin/:id — full order detail for the admin (any owner). */
+router.get(
+  "/admin/:id",
+  asyncHandler(requireAdmin),
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: "Invalid order id" });
+      return;
+    }
+    const order = await prisma.order.findUnique({
+      where: { id },
+      include: adminOrderInclude,
+    });
+    if (!order) {
+      res.status(404).json({ error: "Order not found" });
+      return;
+    }
+    res.json(serializeAdminOrder(order));
+  })
+);
+
+/* PATCH /api/orders/admin/:id/status — drive the fulfilment workflow forward
+   (PLACED → PROCESSING → SHIPPED → DELIVERED). Forward-only: a request to move
+   to the current/an earlier status, or to touch a CANCELLED/RETURNED order, is
+   rejected. The transition is status-guarded so two concurrent updates can't
+   race. Persisted to the orders table. */
+router.patch(
+  "/admin/:id/status",
+  asyncHandler(requireAdmin),
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: "Invalid order id" });
+      return;
+    }
+
+    const target = String(req.body?.status ?? "").toUpperCase();
+    if (!ADMIN_STATUS_FLOW.includes(target as OrderStatus)) {
+      res.status(400).json({
+        error: "status must be one of PLACED, PROCESSING, SHIPPED, DELIVERED",
+      });
+      return;
+    }
+
+    const order = await prisma.order.findUnique({ where: { id } });
+    if (!order) {
+      res.status(404).json({ error: "Order not found" });
+      return;
+    }
+    if (order.status === "CANCELLED" || order.status === "RETURNED") {
+      res.status(400).json({
+        error: `A ${order.status.toLowerCase()} order can no longer be updated.`,
+      });
+      return;
+    }
+
+    const currentRank = STATUS_RANK[order.status] ?? 0;
+    const targetRank = STATUS_RANK[target];
+    if (targetRank <= currentRank) {
+      res.status(400).json({
+        error: `Order is already ${order.status}. Status can only move forward.`,
+      });
+      return;
+    }
+
+    // Status-guarded transition: only updates while the row still holds the
+    // status we read, so a concurrent update can't be silently overwritten.
+    const transitioned = await prisma.order.updateMany({
+      where: { id, status: order.status },
+      data: { status: target as OrderStatus },
+    });
+    if (transitioned.count === 0) {
+      res.status(409).json({ error: "Order was updated by someone else. Please reload." });
+      return;
+    }
+
+    const updated = await prisma.order.findUnique({
+      where: { id },
+      include: adminOrderInclude,
+    });
+    res.json(serializeAdminOrder(updated));
   })
 );
 

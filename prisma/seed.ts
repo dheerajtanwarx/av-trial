@@ -348,6 +348,18 @@ async function main() {
     });
   }
 
+  console.log("Seeding admin user for review moderation…");
+  const ADMIN_EMAIL = "admin@avcreation.test";
+  const ADMIN_PHONE = "+919811111111";
+  // Clear any prior record holding the admin email or phone so the seed is
+  // re-runnable without hitting the unique constraints on either field.
+  await prisma.user.deleteMany({
+    where: { OR: [{ email: ADMIN_EMAIL }, { phone: ADMIN_PHONE }] },
+  });
+  await prisma.user.create({
+    data: { email: ADMIN_EMAIL, name: "AV Admin", phone: ADMIN_PHONE, role: "ADMIN" },
+  });
+
   console.log("Seeding demo customer + delivered order + approved reviews…");
   const demoUser = await prisma.user.create({
     data: {
@@ -420,6 +432,7 @@ async function main() {
 
   console.log("✅ Seed complete.");
   console.log(`   Demo user id=${demoUser.id} (demo@avcreation.test)`);
+  console.log(`   Admin user: admin@avcreation.test / +919811111111 (role ADMIN)`);
 }
 
 main()

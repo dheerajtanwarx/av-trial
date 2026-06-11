@@ -14,6 +14,9 @@ import cartRouter from "./routes/cart";
 import wishlistRouter from "./routes/wishlist";
 import addressesRouter from "./routes/addresses";
 import reviewsRouter from "./routes/reviews";
+import adminRouter from "./routes/admin";
+import adminProductsRouter from "./routes/adminProducts";
+import settingsRouter from "./routes/settings";
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 4000);
@@ -44,6 +47,9 @@ app.use("/api/cart", cartRouter);
 app.use("/api/wishlist", wishlistRouter);
 app.use("/api/addresses", addressesRouter);
 app.use("/api/reviews", reviewsRouter);
+app.use("/api/admin/products", adminProductsRouter);
+app.use("/api/admin", adminRouter);
+app.use("/api/settings", settingsRouter);
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
