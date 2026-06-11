@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc --noEmit",
+    "postinstall": "prisma generate",
+    "build": "prisma generate && tsc --noEmit",
     "start": "tsx src/server.ts",
     "seed": "tsx prisma/seed.ts",
     "lint": "eslint src/**/*.ts"
