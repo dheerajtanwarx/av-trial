@@ -33,6 +33,33 @@ function parseOrderNo(raw: unknown): number | null {
 
 type IncomingItem = { slug?: string; color?: string; size?: string; qty?: number };
 
+/** Thrown inside the order transaction when a conditional stock decrement
+    matches no row (someone else bought the last units mid-checkout). */
+class OutOfStockError extends Error {
+  variantId: number;
+  constructor(variantId: number) {
+    super("out of stock");
+    this.variantId = variantId;
+  }
+}
+
+/** Friendly 409 payload for one or more unavailable lines. */
+function outOfStockResponse(
+  res: Response,
+  shortages: { name: string; color: string; available: number; requested: number }[]
+) {
+  const lines = shortages.map((s) =>
+    s.available <= 0
+      ? `${s.name} (${s.color}) is out of stock`
+      : `only ${s.available} left of ${s.name} (${s.color}) — you asked for ${s.requested}`
+  );
+  res.status(409).json({
+    error: `Some items in your bag are no longer available: ${lines.join("; ")}. Please update your bag and try again.`,
+    code: "OUT_OF_STOCK",
+    items: shortages,
+  });
+}
+
 /* POST /api/orders/track — public order lookup by order number + email.
    No auth: the email acts as the shared secret. Matches against the buyer's
    account email (set for Google + guest checkouts). */
@@ -99,6 +126,9 @@ router.post(
       size: string | null;
       qty: number;
       unitPrice: number;
+      stockQty: number;
+      name: string;
+      color: string;
     }[] = [];
     for (const it of items) {
       const qty = Math.max(1, Number(it.qty ?? 1));
@@ -119,7 +149,29 @@ router.post(
         size: it.size ?? null,
         qty,
         unitPrice: toNumber(variant.price),
+        stockQty: variant.stockQty,
+        name: product.name,
+        color: variant.color,
       });
+    }
+
+    // Stock pre-check. Lines can share a variant (same colour, different
+    // sizes), so demand is aggregated per variant before comparing. This is
+    // a fast-fail courtesy read; the authoritative guard is the conditional
+    // decrement inside the transaction below.
+    const needByVariant = new Map<number, number>();
+    for (const r of resolved) {
+      needByVariant.set(r.variantId, (needByVariant.get(r.variantId) ?? 0) + r.qty);
+    }
+    const shortages = [...needByVariant.entries()]
+      .map(([variantId, need]) => {
+        const line = resolved.find((r) => r.variantId === variantId)!;
+        return { name: line.name, color: line.color, available: line.stockQty, requested: need };
+      })
+      .filter((s) => s.requested > s.available);
+    if (shortages.length > 0) {
+      outOfStockResponse(res, shortages);
+      return;
     }
 
     const subtotal = resolved.reduce((s, r) => s + r.unitPrice * r.qty, 0);
@@ -160,60 +212,94 @@ router.post(
 
     const paymentStatus: PaymentStatus = method === "COD" ? "PENDING" : "SUCCESS";
 
-    const order = await prisma.$transaction(async (tx) => {
-      const addr = await tx.address.create({
-        data: {
-          userId,
-          fullName: `${address.first} ${address.last}`.trim(),
-          phone: String(address.phone),
-          street: String(address.address),
-          city: String(address.city),
-          state: String(address.state),
-          pincode: String(address.pin),
-        },
-      });
+    let order;
+    try {
+      order = await prisma.$transaction(async (tx) => {
+        // Conditional decrement first: only matches while enough stock remains,
+        // so two concurrent checkouts can't both take the last unit and the
+        // quantity can never go negative. Zero rows matched → roll back.
+        for (const [variantId, need] of needByVariant) {
+          const updated = await tx.productVariant.updateMany({
+            where: { id: variantId, stockQty: { gte: need } },
+            data: { stockQty: { decrement: need } },
+          });
+          if (updated.count === 0) throw new OutOfStockError(variantId);
+        }
 
-      const created = await tx.order.create({
-        data: {
-          userId,
-          addressId: addr.id,
-          totalAmount: subtotal,
-          discount,
-          finalAmount,
-          shippingMethod: deliveryId,
-          shippingFee: shipping.fee,
-          status: "PLACED",
-          items: {
-            create: resolved.map((r) => ({
-              variantId: r.variantId,
-              size: r.size,
-              quantity: r.qty,
-              unitPrice: r.unitPrice,
-              totalPrice: r.unitPrice * r.qty,
-            })),
+        const addr = await tx.address.create({
+          data: {
+            userId,
+            fullName: `${address.first} ${address.last}`.trim(),
+            phone: String(address.phone),
+            street: String(address.address),
+            city: String(address.city),
+            state: String(address.state),
+            pincode: String(address.pin),
           },
-          payments: {
-            create: {
-              method,
-              status: paymentStatus,
-              amount: finalAmount,
-              gateway: "mock",
-              paidAt: paymentStatus === "SUCCESS" ? new Date() : null,
+        });
+
+        const created = await tx.order.create({
+          data: {
+            userId,
+            addressId: addr.id,
+            totalAmount: subtotal,
+            discount,
+            finalAmount,
+            shippingMethod: deliveryId,
+            shippingFee: shipping.fee,
+            status: "PLACED",
+            items: {
+              create: resolved.map((r) => ({
+                variantId: r.variantId,
+                size: r.size,
+                quantity: r.qty,
+                unitPrice: r.unitPrice,
+                totalPrice: r.unitPrice * r.qty,
+              })),
+            },
+            payments: {
+              create: {
+                method,
+                status: paymentStatus,
+                amount: finalAmount,
+                gateway: "mock",
+                paidAt: paymentStatus === "SUCCESS" ? new Date() : null,
+              },
             },
           },
-        },
-      });
-
-      // Decrement stock per line.
-      for (const r of resolved) {
-        await tx.productVariant.update({
-          where: { id: r.variantId },
-          data: { stockQty: { decrement: r.qty } },
         });
-      }
 
-      return created;
-    });
+        // Clear the purchased lines from the user's server cart. This runs inside
+        // the same transaction as the order creation so cart cleanup and order
+        // creation are atomic: either both happen or neither does. The server
+        // cart (cart_items, keyed by userId) is the source of truth that GET
+        // /api/cart and the login-merge read from, so without this the cart
+        // repopulates on the next refresh/login. Scoped to the ordered variants
+        // so items added on another device mid-checkout aren't wiped.
+        await tx.cartItem.deleteMany({
+          where: { userId, variantId: { in: resolved.map((r) => r.variantId) } },
+        });
+
+        return created;
+      });
+    } catch (err) {
+      if (err instanceof OutOfStockError) {
+        const variant = await prisma.productVariant.findUnique({
+          where: { id: err.variantId },
+          include: { product: { select: { name: true } } },
+        });
+        outOfStockResponse(res, [
+          {
+            name: variant?.product.name ?? "An item",
+            color: variant?.color ?? "",
+            available: Math.max(0, variant?.stockQty ?? 0),
+            requested: needByVariant.get(err.variantId) ?? 0,
+          },
+        ]);
+        return;
+      }
+      throw err;
+    }
 
     const etaDate = new Date(Date.now() + shipping.days * 86_400_000);
     const eta = etaDate.toLocaleDateString("en-IN", {
@@ -338,7 +424,7 @@ router.patch(
       res.status(400).json({ error: "Invalid order id" });
       return;
     }
-    const order = await prisma.order.findUnique({ where: { id } });
+    const order = await prisma.order.findUnique({ where: { id }, include: { items: true } });
     if (!order || order.userId !== Number(req.currentUser!.id)) {
       res.status(404).json({ error: "Order not found" });
       return;
@@ -347,11 +433,34 @@ router.patch(
       res.status(400).json({ error: "This order can no longer be cancelled" });
       return;
     }
-    const updated = await prisma.order.update({
-      where: { id },
-      data: { status: "CANCELLED" },
-      include: orderInclude,
+    const updated = await prisma.$transaction(async (tx) => {
+      // Status-guarded transition: a concurrent cancel (double click, second
+      // tab) matches zero rows on the second attempt, so the stock below is
+      // restored exactly once.
+      const transitioned = await tx.order.updateMany({
+        where: { id, status: { in: ["PLACED", "CONFIRMED"] } },
+        data: { status: "CANCELLED" },
+      });
+      if (transitioned.count === 0) return null;
+
+      for (const it of order.items) {
+        await tx.productVariant.update({
+          where: { id: it.variantId },
+          data: { stockQty: { increment: it.quantity } },
+        });
+      }
+      // Mark any captured payment as refunded (mock gateway — no real money moves).
+      await tx.payment.updateMany({
+        where: { orderId: id, status: "SUCCESS" },
+        data: { status: "REFUNDED" },
+      });
+
+      return tx.order.findUnique({ where: { id }, include: orderInclude });
     });
+    if (!updated) {
+      res.status(400).json({ error: "This order can no longer be cancelled" });
+      return;
+    }
     res.json(serializeOrder(updated));
   })
 );
@@ -366,7 +475,7 @@ router.patch(
       res.status(400).json({ error: "Invalid order id" });
       return;
     }
-    const order = await prisma.order.findUnique({ where: { id } });
+    const order = await prisma.order.findUnique({ where: { id }, include: { items: true } });
     if (!order || order.userId !== Number(req.currentUser!.id)) {
       res.status(404).json({ error: "Order not found" });
       return;
@@ -381,11 +490,32 @@ router.patch(
       return;
     }
     const reason = req.body?.reason ? String(req.body.reason) : null;
-    const updated = await prisma.order.update({
-      where: { id },
-      data: { status: "RETURNED", notes: reason ?? order.notes },
-      include: orderInclude,
+    const updated = await prisma.$transaction(async (tx) => {
+      // Status-guarded transition (same pattern as cancel) so a double-submitted
+      // return can't restock the items twice.
+      const transitioned = await tx.order.updateMany({
+        where: { id, status: "DELIVERED" },
+        data: { status: "RETURNED", notes: reason ?? order.notes },
+      });
+      if (transitioned.count === 0) return null;
+
+      for (const it of order.items) {
+        await tx.productVariant.update({
+          where: { id: it.variantId },
+          data: { stockQty: { increment: it.quantity } },
+        });
+      }
+      await tx.payment.updateMany({
+        where: { orderId: id, status: "SUCCESS" },
+        data: { status: "REFUNDED" },
+      });
+
+      return tx.order.findUnique({ where: { id }, include: orderInclude });
     });
+    if (!updated) {
+      res.status(400).json({ error: "This order has already been returned" });
+      return;
+    }
     res.json(serializeOrder(updated));
   })
 );

@@ -11,6 +11,7 @@ import promosRouter from "./routes/promos";
 import newsletterRouter from "./routes/newsletter";
 import ordersRouter from "./routes/orders";
 import cartRouter from "./routes/cart";
+import wishlistRouter from "./routes/wishlist";
 import addressesRouter from "./routes/addresses";
 import reviewsRouter from "./routes/reviews";
 
@@ -40,6 +41,7 @@ app.use("/api/promos", promosRouter);
 app.use("/api/newsletter", newsletterRouter);
 app.use("/api/orders", ordersRouter);
 app.use("/api/cart", cartRouter);
+app.use("/api/wishlist", wishlistRouter);
 app.use("/api/addresses", addressesRouter);
 app.use("/api/reviews", reviewsRouter);
 

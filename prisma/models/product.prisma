@@ -34,6 +34,7 @@ model Product {
   images   ProductImage[]
   variants ProductVariant[]
   reviews  Review[]
+  wishlist WishlistItem[]
 
   @@map("products")
 }

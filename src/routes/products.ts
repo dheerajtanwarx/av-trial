@@ -32,7 +32,7 @@ router.get(
           : {}),
         ...(bestseller === "true" ? { isBestseller: true } : {}),
       },
-      include: { images: imageInclude },
+      include: { images: imageInclude, variants: { select: { stockQty: true } } },
       orderBy: { createdAt: "asc" },
     });
 
@@ -133,7 +133,11 @@ router.get(
     const pdp = buildPdp({
       product,
       images: product.images.map((i) => i.imageUrl),
-      colors: product.variants.map((v) => ({ name: v.color, hex: v.colorHex })),
+      colors: product.variants.map((v) => ({
+        name: v.color,
+        hex: v.colorHex,
+        stock: v.stockQty,
+      })),
       reviews,
       reviewDist: buildReviewDist(reviewRows.map((r) => r.rating)),
       related,

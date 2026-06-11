@@ -7,8 +7,10 @@ import { requireAuth } from "../middleware/authMiddleware";
 const router = Router();
 router.use(requireAuth);
 
-/** Resolve a { slug, color } pair to a concrete variant id. */
-async function resolveVariant(slug: string, color?: string): Promise<number | null> {
+type ResolvedVariant = { id: number; stockQty: number; color: string; name: string };
+
+/** Resolve a { slug, color } pair to a concrete variant (with current stock). */
+async function resolveVariant(slug: string, color?: string): Promise<ResolvedVariant | null> {
   const product = await prisma.product.findUnique({
     where: { slug },
     include: { variants: { orderBy: { id: "asc" } } },
@@ -18,7 +20,7 @@ async function resolveVariant(slug: string, color?: string): Promise<number | nu
     product.variants.find(
       (v) => v.color.toLowerCase() === String(color ?? "").toLowerCase()
     ) ?? product.variants[0];
-  return variant.id;
+  return { id: variant.id, stockQty: variant.stockQty, color: variant.color, name: product.name };
 }
 
 const cartItemInclude = {
@@ -46,6 +48,7 @@ function serializeCartItem(c: any) {
     type: c.variant.product.type,
     color: { name: c.variant.color, hex: c.variant.colorHex },
     qty: c.quantity,
+    stock: c.variant.stockQty,
     unitPrice: toNumber(c.variant.price),
     price: inr(toNumber(c.variant.price)),
     img: c.variant.product.images?.[0]?.imageUrl ?? "",
@@ -77,15 +80,28 @@ router.post(
       res.status(400).json({ error: "slug is required" });
       return;
     }
-    const variantId = await resolveVariant(String(slug), color);
-    if (!variantId) {
+    const variant = await resolveVariant(String(slug), color);
+    if (!variant) {
       res.status(404).json({ error: "Product not found" });
       return;
     }
+    if (variant.stockQty <= 0) {
+      res.status(409).json({
+        error: `${variant.name} (${variant.color}) is out of stock`,
+        code: "OUT_OF_STOCK",
+      });
+      return;
+    }
+    // Cap the line at available stock (the cart is not a reservation; the
+    // order endpoint re-checks at checkout).
+    const existing = await prisma.cartItem.findUnique({
+      where: { userId_variantId: { userId, variantId: variant.id } },
+    });
+    const target = Math.min((existing?.quantity ?? 0) + qty, variant.stockQty);
     const item = await prisma.cartItem.upsert({
-      where: { userId_variantId: { userId, variantId } },
-      update: { quantity: { increment: qty } },
-      create: { userId, variantId, quantity: qty },
+      where: { userId_variantId: { userId, variantId: variant.id } },
+      update: { quantity: target },
+      create: { userId, variantId: variant.id, quantity: target },
       include: cartItemInclude,
     });
     res.status(201).json(serializeCartItem(item));
@@ -103,7 +119,10 @@ router.patch(
       res.status(400).json({ error: "Invalid id or qty" });
       return;
     }
-    const existing = await prisma.cartItem.findUnique({ where: { id } });
+    const existing = await prisma.cartItem.findUnique({
+      where: { id },
+      include: { variant: { select: { stockQty: true } } },
+    });
     if (!existing || existing.userId !== userId) {
       res.status(404).json({ error: "Cart item not found" });
       return;
@@ -115,7 +134,7 @@ router.patch(
     }
     const item = await prisma.cartItem.update({
       where: { id },
-      data: { quantity: qty },
+      data: { quantity: Math.min(qty, Math.max(1, existing.variant.stockQty)) },
       include: cartItemInclude,
     });
     res.json(serializeCartItem(item));
@@ -148,12 +167,16 @@ router.post(
     for (const it of items) {
       if (!it?.slug) continue;
       const qty = Math.max(1, Number(it.qty ?? 1));
-      const variantId = await resolveVariant(String(it.slug), it.color);
-      if (!variantId) continue;
+      const variant = await resolveVariant(String(it.slug), it.color);
+      if (!variant || variant.stockQty <= 0) continue;
+      const existing = await prisma.cartItem.findUnique({
+        where: { userId_variantId: { userId, variantId: variant.id } },
+      });
+      const target = Math.min((existing?.quantity ?? 0) + qty, variant.stockQty);
       await prisma.cartItem.upsert({
-        where: { userId_variantId: { userId, variantId } },
-        update: { quantity: { increment: qty } },
-        create: { userId, variantId, quantity: qty },
+        where: { userId_variantId: { userId, variantId: variant.id } },
+        update: { quantity: target },
+        create: { userId, variantId: variant.id, quantity: target },
       });
     }
     const merged = await prisma.cartItem.findMany({

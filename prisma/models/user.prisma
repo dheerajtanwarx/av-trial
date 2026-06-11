@@ -18,6 +18,7 @@ model User {
 
   addresses Address[]
   cartItems CartItem[]
+  wishlist  WishlistItem[]
 
   accounts  Account[]
   sessions  Session[]

@@ -12,6 +12,7 @@ type ProductWithImages = {
   badge: string | null;
   rating: number | null;
   images: { imageUrl: string; sortOrder: number; isPrimary: boolean }[];
+  variants?: { stockQty: number }[];
 };
 
 export type ProductCard = {
@@ -24,6 +25,7 @@ export type ProductCard = {
   flag?: { label: string; sale?: boolean };
   main: string;
   alt: string;
+  soldOut?: boolean;
 };
 
 /** Render a star string like "★★★★★" / "★★★★☆" from a numeric rating. */
@@ -50,6 +52,13 @@ export function serializeProductCard(p: ProductWithImages): ProductCard {
     flag = { label: p.badge };
   }
 
+  // Sold out only when variants were loaded and none has stock; products
+  // queried without variants (or with no variants yet) stay purchasable.
+  const soldOut =
+    Array.isArray(p.variants) &&
+    p.variants.length > 0 &&
+    p.variants.every((v) => v.stockQty <= 0);
+
   return {
     slug: p.slug,
     name: p.name,
@@ -60,5 +69,6 @@ export function serializeProductCard(p: ProductWithImages): ProductCard {
     flag,
     main: imgs[0]?.imageUrl ?? "",
     alt: imgs[1]?.imageUrl ?? imgs[0]?.imageUrl ?? "",
+    soldOut: soldOut || undefined,
   };
 }
