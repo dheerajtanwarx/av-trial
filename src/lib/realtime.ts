@@ -35,6 +35,10 @@ interface Client {
   userId: number;
   res: Response;
   connectedAt: number;
+  /** ms epoch when the auth token presented at connect time expires; the
+      heartbeat closes the stream then, forcing a reconnect that re-runs
+      requireAdmin. Null = no expiry claim on the token. */
+  expiresAt: number | null;
 }
 
 const clients = new Set<Client>();
@@ -52,7 +56,11 @@ export function writeEvent(res: Response, e: RealtimeEvent): void {
   res.write(`event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`);
 }
 
-export function addClient(userId: number, res: Response): Client {
+export function addClient(
+  userId: number,
+  res: Response,
+  expiresAt: number | null = null
+): Client {
   const mine = [...clients]
     .filter((c) => c.userId === userId)
     .sort((a, b) => a.connectedAt - b.connectedAt);
@@ -65,9 +73,31 @@ export function addClient(userId: number, res: Response): Client {
     }
     clients.delete(oldest);
   }
-  const client: Client = { userId, res, connectedAt: Date.now() };
+  const client: Client = { userId, res, connectedAt: Date.now(), expiresAt };
   clients.add(client);
   return client;
+}
+
+/** Distinct user ids with at least one open stream (for periodic re-auth). */
+export function connectedUserIds(): number[] {
+  return [...new Set([...clients].map((c) => c.userId))];
+}
+
+/** Close every stream belonging to these users — used when a periodic
+    re-check finds a connected user is no longer an admin. The client's
+    EventSource will reconnect and be rejected by requireAdmin. */
+export function dropUsers(userIds: number[]): void {
+  if (userIds.length === 0) return;
+  const drop = new Set(userIds);
+  for (const c of clients) {
+    if (!drop.has(c.userId)) continue;
+    try {
+      c.res.end();
+    } catch {
+      /* already gone */
+    }
+    clients.delete(c);
+  }
 }
 
 export function removeClient(client: Client): void {
@@ -88,9 +118,20 @@ export function publish(e: RealtimeEvent): void {
 }
 
 const heartbeat = setInterval(() => {
+  const now = Date.now();
   for (const c of clients) {
+    // A stream must not outlive the credentials that opened it.
+    if (c.expiresAt != null && now >= c.expiresAt) {
+      try {
+        c.res.end();
+      } catch {
+        /* already gone */
+      }
+      clients.delete(c);
+      continue;
+    }
     try {
-      c.res.write(`: ping ${Date.now()}\n\n`);
+      c.res.write(`: ping ${now}\n\n`);
     } catch {
       clients.delete(c);
     }

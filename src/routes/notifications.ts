@@ -106,6 +106,29 @@ router.get(
       ...(Object.keys(notifWhere).length > 0 ? { notification: notifWhere } : {}),
     };
 
+    // Keyset mode (?cursor=<notification id>): newest-first infinite scroll.
+    // No OFFSET scan and no COUNT — both grow with table size; the dropdown
+    // pulls pages this way so it stays O(pageSize) at any depth. Fetching one
+    // extra row stands in for the count to decide whether more exist.
+    const cursor = Number(req.query.cursor);
+    if (Number.isInteger(cursor) && cursor > 0) {
+      const rows = await prisma.notificationRecipient.findMany({
+        where: { ...where, notificationId: { lt: cursor } },
+        include: { notification: true },
+        orderBy: { notificationId: "desc" },
+        take: pageSize + 1,
+      });
+      const pageRows = rows.slice(0, pageSize);
+      res.json({
+        notifications: pageRows.map(serializeRow),
+        nextCursor:
+          rows.length > pageSize
+            ? pageRows[pageRows.length - 1].notificationId
+            : null,
+      });
+      return;
+    }
+
     const [total, unread, rows] = await Promise.all([
       prisma.notificationRecipient.count({ where }),
       prisma.notificationRecipient.count({
@@ -254,40 +277,38 @@ router.post(
 );
 
 /* POST /api/admin/notifications/read-all — mark every unread, non-archived
-   notification read. Logged as a single read_all row with the count + ids. */
+   notification read. One UPDATE regardless of volume; the audit row and the
+   sync event carry only the count (an inbox can hold thousands of unread
+   rows — never load or ship the full id list). */
 router.post(
   "/read-all",
   asyncHandler(async (req: Request, res: Response) => {
     const userId = Number(req.currentUser!.id);
-    const ids = await notifyTx(async (tx) => {
-      const pending = await tx.notificationRecipient.findMany({
+    const updated = await notifyTx(async (tx) => {
+      const u = await tx.notificationRecipient.updateMany({
         where: { userId, archivedAt: null, readAt: null },
-        select: { notificationId: true },
-      });
-      if (pending.length === 0) return [] as number[];
-      const found = pending.map((p) => p.notificationId);
-      await tx.notificationRecipient.updateMany({
-        where: { userId, notificationId: { in: found }, readAt: null },
         data: { readAt: new Date() },
       });
-      await logActivity(tx, {
-        action: ACTIONS.NOTIFICATION_READ_ALL,
-        actorType: "ADMIN",
-        actorId: userId,
-        entityType: "notification",
-        meta: { count: found.length, notificationIds: found },
-        req,
-      });
-      return found;
+      if (u.count > 0) {
+        await logActivity(tx, {
+          action: ACTIONS.NOTIFICATION_READ_ALL,
+          actorType: "ADMIN",
+          actorId: userId,
+          entityType: "notification",
+          meta: { count: u.count },
+          req,
+        });
+      }
+      return u.count;
     });
-    if (ids.length > 0) {
+    if (updated > 0) {
       publish({
         event: "notification:read_all",
-        data: { count: ids.length, ids },
+        data: { count: updated },
         userIds: [userId],
       });
     }
-    res.json({ updated: ids.length });
+    res.json({ updated });
   })
 );
 
