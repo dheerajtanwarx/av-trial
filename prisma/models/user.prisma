@@ -23,6 +23,8 @@ model User {
   accounts  Account[]
   sessions  Session[]
   otpTokens OtpToken[]
+
+  notificationStates NotificationRecipient[]
 }
 
 enum Role {

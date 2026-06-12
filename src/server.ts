@@ -20,6 +20,9 @@ import inventoryRouter from "./routes/inventory";
 import customersRouter from "./routes/customers";
 import reportsRouter from "./routes/reports";
 import settingsRouter from "./routes/settings";
+import notificationsRouter from "./routes/notifications";
+import activityRouter from "./routes/activity";
+import realtimeRouter from "./routes/realtime";
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 4000);
@@ -54,6 +57,9 @@ app.use("/api/admin/products", adminProductsRouter);
 app.use("/api/admin/inventory", inventoryRouter);
 app.use("/api/admin/customers", customersRouter);
 app.use("/api/admin/reports", reportsRouter);
+app.use("/api/admin/notifications", notificationsRouter);
+app.use("/api/admin/activity", activityRouter);
+app.use("/api/admin/realtime", realtimeRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/settings", settingsRouter);
 

@@ -62,6 +62,15 @@ const PENDING_STATUSES: OrderStatus[] = ["PLACED", "CONFIRMED", "PROCESSING", "S
 
 const TREND_DAYS = 14;
 
+/** Start of the current calendar day in IST — "today" means the Indian
+    business day regardless of server timezone. */
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+function startOfTodayIST(): Date {
+  const nowIst = new Date(Date.now() + IST_OFFSET_MS);
+  nowIst.setUTCHours(0, 0, 0, 0);
+  return new Date(nowIst.getTime() - IST_OFFSET_MS);
+}
+
 /** Local-time YYYY-MM-DD key for day bucketing. */
 function dayKey(d: Date): string {
   const y = d.getFullYear();
@@ -88,6 +97,9 @@ router.get(
       totalProducts,
       pendingOrders,
       deliveredOrders,
+      todayOrders,
+      cancelledOrders,
+      refunds,
       byStatusRaw,
       windowOrders,
     ] = await Promise.all([
@@ -100,6 +112,11 @@ router.get(
       prisma.product.count(),
       prisma.order.count({ where: { status: { in: PENDING_STATUSES } } }),
       prisma.order.count({ where: { status: "DELIVERED" } }),
+      prisma.order.count({ where: { placedAt: { gte: startOfTodayIST() } } }),
+      prisma.order.count({ where: { status: "CANCELLED" } }),
+      // "Refunds" = payments flipped to REFUNDED (mock gateway: cancel/return
+      // auto-refund captured payments, plus the admin refund endpoint).
+      prisma.payment.count({ where: { status: "REFUNDED" } }),
       prisma.order.groupBy({ by: ["status"], _count: { _all: true } }),
       prisma.order.findMany({
         where: { placedAt: { gte: start } },
@@ -139,6 +156,9 @@ router.get(
         totalProducts,
         pendingOrders,
         deliveredOrders,
+        todayOrders,
+        cancelledOrders,
+        refunds,
       },
       daily,
       byStatus,

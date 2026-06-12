@@ -1,0 +1,59 @@
+enum NotificationType {
+  NEW_ORDER
+  ORDER_CANCELLED
+  PAYMENT_SUCCESS
+  REFUND_REQUESTED
+  REFUND_COMPLETED
+  ORDER_STATUS_CHANGE
+  DELIVERY_UPDATE
+  SYSTEM_ALERT
+}
+
+enum NotificationPriority {
+  CRITICAL
+  HIGH
+  MEDIUM
+  INFO
+}
+
+// One row per business event. Per-admin read/archived state lives on
+// NotificationRecipient, so the content is stored once and the history is
+// immutable — rows are never deleted (audit retention).
+model Notification {
+  id        Int                  @id @default(autoincrement())
+  type      NotificationType
+  priority  NotificationPriority
+  title     String               @db.VarChar(255)
+  body      String               @db.Text
+  orderId   Int?
+  meta      Json?
+  createdAt DateTime             @default(now())
+
+  order      Order?                  @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  recipients NotificationRecipient[]
+
+  @@index([type, createdAt])
+  @@index([priority, createdAt])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+// Fan-out target: one row per admin existing when the notification was
+// created. An admin promoted later starts with an empty inbox (the activity
+// log is the global history). "Archived" hides a row from the default inbox
+// view; nothing is ever hard-deleted.
+model NotificationRecipient {
+  id             Int       @id @default(autoincrement())
+  notificationId Int
+  userId         Int
+  readAt         DateTime?
+  archivedAt     DateTime?
+  createdAt      DateTime  @default(now())
+
+  notification Notification @relation(fields: [notificationId], references: [id], onDelete: Restrict)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([notificationId, userId])
+  @@index([userId, archivedAt, readAt])
+  @@map("notification_recipients")
+}

@@ -52,9 +52,10 @@ model Order {
   address Address @relation(fields: [addressId], references: [id], onDelete: Restrict)
 
   //reverse relation
-  items    OrderItem[]
-  payments Payment[]
-  reviews  Review[]
+  items         OrderItem[]
+  payments      Payment[]
+  reviews       Review[]
+  notifications Notification[]
 
   @@map("orders")
 }

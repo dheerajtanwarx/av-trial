@@ -5,6 +5,7 @@ import { toNumber, inr } from "../lib/money";
 import { requireAuth, optionalAuth, requireAdmin } from "../middleware/authMiddleware";
 import { PaymentMethod, PaymentStatus, OrderStatus } from "../../generated/prisma/client";
 import { buildInvoicePdf } from "../lib/invoice";
+import { ACTIONS, emitEvent, emitStockAlerts, logActivity, notifyTx } from "../lib/notify";
 
 const router = Router();
 
@@ -217,7 +218,7 @@ router.post(
 
     let order;
     try {
-      order = await prisma.$transaction(async (tx) => {
+      order = await notifyTx(async (tx) => {
         // Conditional decrement first: only matches while enough stock remains,
         // so two concurrent checkouts can't both take the last unit and the
         // quantity can never go negative. Zero rows matched → roll back.
@@ -282,6 +283,55 @@ router.post(
         await tx.cartItem.deleteMany({
           where: { userId, variantId: { in: resolved.map((r) => r.variantId) } },
         });
+
+        // Admin notification + audit log join the checkout transaction, so an
+        // order can never exist without its trail. Payment is folded into the
+        // NEW_ORDER notification (mock payments settle at checkout — they are
+        // not a separate event).
+        const customerName = `${address.first} ${address.last}`.trim();
+        const itemCount = resolved.reduce((s, r) => s + r.qty, 0);
+        await emitEvent(
+          tx,
+          {
+            type: "NEW_ORDER",
+            title: `New order ${orderNo(created.id)} — ${inr(finalAmount)} via ${method}`,
+            body: `${customerName} ordered ${resolved
+              .map((r) => `${r.name} (${r.color}) ×${r.qty}`)
+              .join(", ")}. Payment ${paymentStatus === "SUCCESS" ? "captured" : "pending (COD)"}.`,
+            orderId: created.id,
+            meta: {
+              orderNo: orderNo(created.id),
+              total: finalAmount,
+              customerName,
+              customerEmail: String(address.email).toLowerCase(),
+              itemCount,
+              placedAt: created.placedAt.toISOString(),
+              payment: { method, status: paymentStatus },
+              items: resolved.map((r) => ({
+                name: r.name,
+                color: r.color,
+                size: r.size,
+                qty: r.qty,
+              })),
+            },
+          },
+          {
+            action: ACTIONS.ORDER_PLACED,
+            actorType: "CUSTOMER",
+            actorId: userId,
+            entityType: "order",
+            entityId: created.id,
+            meta: { total: finalAmount, payment: method, guest: !req.currentUser },
+            req,
+          }
+        );
+
+        // Raise SYSTEM_ALERTs for variants this purchase pushed to zero / low.
+        await emitStockAlerts(
+          tx,
+          undefined,
+          [...needByVariant.entries()].map(([variantId, qty]) => ({ variantId, qty }))
+        );
 
         return created;
       });
@@ -594,11 +644,39 @@ router.patch(
 
     // Status-guarded transition: only updates while the row still holds the
     // status we read, so a concurrent update can't be silently overwritten.
-    const transitioned = await prisma.order.updateMany({
-      where: { id, status: order.status },
-      data: { status: target as OrderStatus },
+    // Notification + audit log share the transaction with the transition.
+    const transitioned = await notifyTx(async (tx) => {
+      const t = await tx.order.updateMany({
+        where: { id, status: order.status },
+        data: { status: target as OrderStatus },
+      });
+      if (t.count === 0) return false;
+
+      // SHIPPED/DELIVERED are logistics news (DELIVERY_UPDATE); the rest of
+      // the flow is fulfilment news (ORDER_STATUS_CHANGE).
+      const isDelivery = target === "SHIPPED" || target === "DELIVERED";
+      await emitEvent(
+        tx,
+        {
+          type: isDelivery ? "DELIVERY_UPDATE" : "ORDER_STATUS_CHANGE",
+          title: `Order ${orderNo(id)} ${target.toLowerCase()}`,
+          body: `Order ${orderNo(id)} moved from ${order.status} to ${target}.`,
+          orderId: id,
+          meta: { from: order.status, to: target },
+        },
+        {
+          action: ACTIONS.ORDER_STATUS_CHANGED,
+          actorType: "ADMIN",
+          actorId: Number(req.currentUser!.id),
+          entityType: "order",
+          entityId: id,
+          meta: { from: order.status, to: target },
+          req,
+        }
+      );
+      return true;
     });
-    if (transitioned.count === 0) {
+    if (!transitioned) {
       res.status(409).json({ error: "Order was updated by someone else. Please reload." });
       return;
     }
@@ -608,6 +686,155 @@ router.patch(
       include: adminOrderInclude,
     });
     res.json(serializeAdminOrder(updated));
+  })
+);
+
+/* GET /api/orders/admin/:id/invoice — invoice/order-summary PDF for any
+   order, any status (the customer-facing route is ownership-checked and
+   DELIVERED-only; admins print from the notification center / order page). */
+router.get(
+  "/admin/:id/invoice",
+  asyncHandler(requireAdmin),
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: "Invalid order id" });
+      return;
+    }
+    const order = await prisma.order.findUnique({
+      where: { id },
+      include: { ...orderInclude, user: { select: { name: true, email: true } } },
+    });
+    if (!order) {
+      res.status(404).json({ error: "Order not found" });
+      return;
+    }
+
+    const serialized = serializeOrder(order);
+    const pdf = await buildInvoicePdf({
+      ...serialized,
+      customer: { name: order.user?.name ?? null, email: order.user?.email ?? null },
+    });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="Invoice-${serialized.no}.pdf"`);
+    res.send(pdf);
+  })
+);
+
+/* PATCH /api/orders/admin/:id/notes — append a timestamped internal note to
+   the order. Notes are admin-facing only (order.notes), audit-logged, no
+   customer notification. */
+router.patch(
+  "/admin/:id/notes",
+  asyncHandler(requireAdmin),
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: "Invalid order id" });
+      return;
+    }
+    const note = String(req.body?.note ?? "").trim().slice(0, 1000);
+    if (!note) {
+      res.status(400).json({ error: "note is required" });
+      return;
+    }
+    const order = await prisma.order.findUnique({ where: { id }, select: { notes: true } });
+    if (!order) {
+      res.status(404).json({ error: "Order not found" });
+      return;
+    }
+
+    const stamp = new Date().toLocaleString("en-IN", {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZone: "Asia/Kolkata",
+    });
+    const entry = `[${stamp} · ${req.currentUser!.email ?? "admin"}] ${note}`;
+    const notes = order.notes ? `${order.notes}\n${entry}` : entry;
+
+    const updated = await notifyTx(async (tx) => {
+      const row = await tx.order.update({ where: { id }, data: { notes } });
+      await logActivity(tx, {
+        action: ACTIONS.ORDER_NOTE_ADDED,
+        actorType: "ADMIN",
+        actorId: Number(req.currentUser!.id),
+        entityType: "order",
+        entityId: id,
+        meta: { note },
+        req,
+      });
+      return row;
+    });
+    res.json({ id, notes: updated.notes });
+  })
+);
+
+/* POST /api/orders/admin/:id/refund — flip any still-captured payment on a
+   cancelled/returned order to REFUNDED (mock gateway — no real money moves).
+   Idempotent: cancel/return already auto-refund captured payments, so this
+   usually reports there was nothing left to do. First real trigger for the
+   REFUND_COMPLETED notification type. */
+router.post(
+  "/admin/:id/refund",
+  asyncHandler(requireAdmin),
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: "Invalid order id" });
+      return;
+    }
+    const order = await prisma.order.findUnique({
+      where: { id },
+      include: { user: { select: { name: true } }, address: { select: { fullName: true } } },
+    });
+    if (!order) {
+      res.status(404).json({ error: "Order not found" });
+      return;
+    }
+    if (order.status !== "CANCELLED" && order.status !== "RETURNED") {
+      res.status(400).json({ error: "Refunds apply to cancelled or returned orders only" });
+      return;
+    }
+
+    const refunded = await notifyTx(async (tx) => {
+      const flipped = await tx.payment.updateMany({
+        where: { orderId: id, status: "SUCCESS" },
+        data: { status: "REFUNDED" },
+      });
+      if (flipped.count === 0) return 0;
+
+      const customerName = order.user?.name ?? order.address?.fullName ?? "Customer";
+      const total = toNumber(order.finalAmount);
+      await emitEvent(
+        tx,
+        {
+          type: "REFUND_COMPLETED",
+          title: `Refund completed for order ${orderNo(id)}`,
+          body: `${inr(total)} marked refunded to ${customerName} for ${order.status.toLowerCase()} order ${orderNo(id)}.`,
+          orderId: id,
+          meta: { orderNo: orderNo(id), total, customerName },
+        },
+        {
+          action: ACTIONS.ORDER_REFUND_PROCESSED,
+          actorType: "ADMIN",
+          actorId: Number(req.currentUser!.id),
+          entityType: "order",
+          entityId: id,
+          meta: { amount: total },
+          req,
+        }
+      );
+      return flipped.count;
+    });
+
+    res.json({
+      refunded,
+      message: refunded > 0 ? "Refund processed." : "No captured payment left to refund.",
+    });
   })
 );
 
@@ -679,7 +906,15 @@ router.patch(
       res.status(400).json({ error: "Invalid order id" });
       return;
     }
-    const order = await prisma.order.findUnique({ where: { id }, include: { items: true } });
+    const order = await prisma.order.findUnique({
+      where: { id },
+      include: {
+        items: true,
+        user: { select: { name: true, email: true, phone: true } },
+        address: { select: { fullName: true, phone: true } },
+        payments: { orderBy: { id: "asc" } },
+      },
+    });
     if (!order || order.userId !== Number(req.currentUser!.id)) {
       res.status(404).json({ error: "Order not found" });
       return;
@@ -688,13 +923,14 @@ router.patch(
       res.status(400).json({ error: "This order can no longer be cancelled" });
       return;
     }
-    const updated = await prisma.$transaction(async (tx) => {
+    const reason = req.body?.reason ? String(req.body.reason).trim().slice(0, 500) : null;
+    const updated = await notifyTx(async (tx) => {
       // Status-guarded transition: a concurrent cancel (double click, second
       // tab) matches zero rows on the second attempt, so the stock below is
       // restored exactly once.
       const transitioned = await tx.order.updateMany({
         where: { id, status: { in: ["PLACED", "CONFIRMED"] } },
-        data: { status: "CANCELLED" },
+        data: { status: "CANCELLED", ...(reason ? { notes: reason } : {}) },
       });
       if (transitioned.count === 0) return null;
 
@@ -705,10 +941,58 @@ router.patch(
         });
       }
       // Mark any captured payment as refunded (mock gateway — no real money moves).
-      await tx.payment.updateMany({
+      const refunded = await tx.payment.updateMany({
         where: { orderId: id, status: "SUCCESS" },
         data: { status: "REFUNDED" },
       });
+
+      const customerName = order.user?.name ?? order.address?.fullName ?? "Customer";
+      const total = toNumber(order.finalAmount);
+      const payment = order.payments[0] ?? null;
+      const paymentStatus = refunded.count > 0 ? "REFUNDED" : payment?.status ?? null;
+      // Mock gateway: a captured payment is refunded in the same breath as the
+      // cancel; anything else (COD pending) has no money to return.
+      const refundStatus = refunded.count > 0 ? "REFUNDED" : "NOT_REQUIRED";
+
+      await emitEvent(
+        tx,
+        {
+          type: "ORDER_CANCELLED",
+          // Cancellations surface as critical (red) in the admin UI.
+          priority: "CRITICAL",
+          title: `Order ${orderNo(id)} cancelled by customer`,
+          body: `${customerName} cancelled order ${orderNo(id)} (${inr(total)}) while ${order.status}${
+            reason ? ` — "${reason}"` : ""
+          }. Payment: ${paymentStatus ?? "none"}. Refund: ${refundStatus}. Stock restored.`,
+          orderId: id,
+          meta: {
+            orderNo: orderNo(id),
+            previousStatus: order.status,
+            total,
+            customerName,
+            customerEmail: order.user?.email ?? null,
+            customerPhone: order.user?.phone ?? order.address?.phone ?? null,
+            reason,
+            cancelledAt: new Date().toISOString(),
+            paymentMethod: payment?.method ?? null,
+            paymentStatus,
+            refundStatus,
+          },
+        },
+        {
+          action: ACTIONS.ORDER_CANCELLED,
+          actorType: "CUSTOMER",
+          actorId: order.userId,
+          entityType: "order",
+          entityId: id,
+          meta: {
+            previousStatus: order.status,
+            reason,
+            paymentRefunded: refunded.count > 0,
+          },
+          req,
+        }
+      );
 
       return tx.order.findUnique({ where: { id }, include: orderInclude });
     });
@@ -745,7 +1029,7 @@ router.patch(
       return;
     }
     const reason = req.body?.reason ? String(req.body.reason) : null;
-    const updated = await prisma.$transaction(async (tx) => {
+    const updated = await notifyTx(async (tx) => {
       // Status-guarded transition (same pattern as cancel) so a double-submitted
       // return can't restock the items twice.
       const transitioned = await tx.order.updateMany({
@@ -760,10 +1044,41 @@ router.patch(
           data: { stockQty: { increment: it.quantity } },
         });
       }
-      await tx.payment.updateMany({
+      const refunded = await tx.payment.updateMany({
         where: { orderId: id, status: "SUCCESS" },
         data: { status: "REFUNDED" },
       });
+
+      // RETURNED rides the ORDER_STATUS_CHANGE type (the dedicated refund
+      // types stay dormant until a real refund flow exists) but at HIGH
+      // priority — money is going back.
+      await emitEvent(
+        tx,
+        {
+          type: "ORDER_STATUS_CHANGE",
+          priority: "HIGH",
+          title: `Return requested for order ${orderNo(id)}`,
+          body: `Order ${orderNo(id)} (${inr(toNumber(order.finalAmount))}) was returned${
+            reason ? ` — "${reason}"` : ""
+          }. Stock restored${refunded.count > 0 ? "; mock payment marked refunded" : ""}.`,
+          orderId: id,
+          meta: {
+            from: "DELIVERED",
+            to: "RETURNED",
+            reason,
+            paymentRefunded: refunded.count > 0,
+          },
+        },
+        {
+          action: ACTIONS.ORDER_RETURNED,
+          actorType: "CUSTOMER",
+          actorId: order.userId,
+          entityType: "order",
+          entityId: id,
+          meta: { reason, paymentRefunded: refunded.count > 0 },
+          req,
+        }
+      );
 
       return tx.order.findUnique({ where: { id }, include: orderInclude });
     });
@@ -805,10 +1120,35 @@ router.patch(
       return;
     }
     const next = FULFILMENT_FLOW[idx + 1] as typeof order.status;
-    const updated = await prisma.order.update({
-      where: { id },
-      data: { status: next },
-      include: orderInclude,
+    // Dev-only shortcut, but it still mutates the shared database — so it
+    // emits and logs exactly like the real admin transition, flagged dev:true.
+    const updated = await notifyTx(async (tx) => {
+      const row = await tx.order.update({
+        where: { id },
+        data: { status: next },
+        include: orderInclude,
+      });
+      const isDelivery = next === "SHIPPED" || next === "DELIVERED";
+      await emitEvent(
+        tx,
+        {
+          type: isDelivery ? "DELIVERY_UPDATE" : "ORDER_STATUS_CHANGE",
+          title: `Order ${orderNo(id)} ${next.toLowerCase()} (dev advance)`,
+          body: `Order ${orderNo(id)} moved from ${order.status} to ${next} via the dev advance endpoint.`,
+          orderId: id,
+          meta: { from: order.status, to: next, dev: true },
+        },
+        {
+          action: ACTIONS.ORDER_STATUS_CHANGED,
+          actorType: "CUSTOMER",
+          actorId: order.userId,
+          entityType: "order",
+          entityId: id,
+          meta: { from: order.status, to: next, dev: true },
+          req,
+        }
+      );
+      return row;
     });
     res.json(serializeOrder(updated));
   })

@@ -1,0 +1,29 @@
+enum ActorType {
+  CUSTOMER
+  ADMIN
+  SYSTEM
+}
+
+// Append-only audit trail. `action` is a namespaced string
+// ("order.placed", "notification.read", ...) — the vocabulary lives in
+// src/lib/notify.ts (ACTIONS) so adding an action is a code change, not a
+// migration. actorId is null for SYSTEM events; there is deliberately no FK
+// on it since the actor may be a customer, an admin, or nobody.
+model ActivityLog {
+  id         Int       @id @default(autoincrement())
+  action     String    @db.VarChar(100)
+  actorType  ActorType
+  actorId    Int?
+  entityType String    @db.VarChar(50)
+  entityId   Int?
+  meta       Json?
+  ip         String?   @db.VarChar(64)
+  userAgent  String?   @db.VarChar(255)
+  createdAt  DateTime  @default(now())
+
+  @@index([action, createdAt])
+  @@index([entityType, entityId])
+  @@index([actorType, actorId, createdAt])
+  @@index([createdAt])
+  @@map("activity_logs")
+}
