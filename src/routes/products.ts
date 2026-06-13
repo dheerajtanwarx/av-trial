@@ -73,15 +73,23 @@ router.get(
     const and: Prisma.ProductWhereInput[] = [];
 
     if (q) {
-      and.push({
-        OR: [
-          { name: { contains: q } },
-          { type: { contains: q } },
-          { description: { contains: q } },
-          { badge: { contains: q } },
-          { category: { name: { contains: q } } },
-        ],
-      });
+      // Amazon/Flipkart-style multi-token match: split the query into words and
+      // require every word to appear in at least one searchable field. A single
+      // word like "suit" still surfaces a whole category via the category name,
+      // while multi-word queries ("cotton suit", "block odhni") narrow sensibly
+      // instead of needing the exact substring.
+      const tokens = q.split(/\s+/).filter(Boolean).slice(0, 6);
+      for (const token of tokens) {
+        and.push({
+          OR: [
+            { name: { contains: token } },
+            { type: { contains: token } },
+            { description: { contains: token } },
+            { badge: { contains: token } },
+            { category: { name: { contains: token } } },
+          ],
+        });
+      }
     }
 
     // Tag tokens live inside the free-text `type` column; match any selected tag.
