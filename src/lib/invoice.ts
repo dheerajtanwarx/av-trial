@@ -1,4 +1,5 @@
 import PDFDocument from "pdfkit";
+import { orderQrBuffer } from "./qr";
 
 /** The serialized-order shape (subset) the invoice needs — matches the output
     of serializeOrder() in routes/orders.ts. */
@@ -42,7 +43,12 @@ const RANI = "#b3375b";
 const LINE = "#e7ddd6";
 
 /** Render a tax-invoice PDF for a delivered order and resolve with the bytes. */
-export function buildInvoicePdf(order: InvoiceOrder): Promise<Buffer> {
+export async function buildInvoicePdf(order: InvoiceOrder): Promise<Buffer> {
+  // Pack/dispatch QR (encodes the order number) — generated up front so it can
+  // be drawn synchronously while the document is built. Best-effort: a QR
+  // failure must never block the invoice.
+  const qr = await orderQrBuffer(order.no).catch(() => null);
+
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({ size: "A4", margin: 50 });
     const chunks: Buffer[] = [];
@@ -107,6 +113,22 @@ export function buildInvoicePdf(order: InvoiceOrder): Promise<Buffer> {
       y + 28
     );
     doc.text(`Status: ${order.status}`, left + width / 2);
+
+    // ── Pack/dispatch QR (top-right of the billed-to band) ───
+    if (qr) {
+      const qrSize = 64;
+      const qrX = right - qrSize;
+      doc.image(qr, qrX, y, { width: qrSize, height: qrSize });
+      doc
+        .fillColor(MUTED)
+        .font("Helvetica")
+        .fontSize(7)
+        .text("SCAN AT DISPATCH", qrX - 8, y + qrSize + 2, {
+          width: qrSize + 16,
+          align: "center",
+          characterSpacing: 0.5,
+        });
+    }
 
     // ── Items table ──────────────────────────────────────────
     y += 90;

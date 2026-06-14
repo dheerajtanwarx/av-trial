@@ -86,6 +86,7 @@ export const ACTIONS = {
   ORDER_CANCELLED: "order.cancelled",
   ORDER_RETURNED: "order.returned",
   ORDER_NOTE_ADDED: "order.note_added",
+  ORDER_TRACKING_UPDATED: "order.tracking_updated",
   ORDER_REFUND_PROCESSED: "order.refund_processed",
   STOCK_LOW: "stock.low",
   STOCK_OUT: "stock.out",

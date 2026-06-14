@@ -5,6 +5,7 @@ import { toNumber, inr } from "../lib/money";
 import { requireAuth, optionalAuth, requireAdmin } from "../middleware/authMiddleware";
 import { PaymentMethod, PaymentStatus, OrderStatus } from "../../generated/prisma/client";
 import { buildInvoicePdf } from "../lib/invoice";
+import { orderQrDataUrl } from "../lib/qr";
 import { ACTIONS, emitEvent, emitStockAlerts, logActivity, notifyTx } from "../lib/notify";
 
 const router = Router();
@@ -576,6 +577,29 @@ router.get(
   })
 );
 
+/* GET /api/orders/admin/lookup?code=AVC-000024 — resolve a scanned packing-slip
+   QR (or a typed order number) to its order id, so the admin scan page can jump
+   straight to the order. The QR carries only the order number — no token, no
+   auth — so this stays behind requireAdmin like every other admin route.
+   Registered before "/admin/:id" so "lookup" isn't read as an order id. */
+router.get(
+  "/admin/lookup",
+  asyncHandler(requireAdmin),
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = parseOrderNo(req.query.code);
+    if (!id) {
+      res.status(400).json({ error: "Unrecognised order code" });
+      return;
+    }
+    const order = await prisma.order.findUnique({ where: { id }, select: { id: true } });
+    if (!order) {
+      res.status(404).json({ error: `No order found for ${String(req.query.code)}` });
+      return;
+    }
+    res.json({ id: order.id, no: orderNo(order.id) });
+  })
+);
+
 /* GET /api/orders/admin/:id — full order detail for the admin (any owner). */
 router.get(
   "/admin/:id",
@@ -594,7 +618,10 @@ router.get(
       res.status(404).json({ error: "Order not found" });
       return;
     }
-    res.json(serializeAdminOrder(order));
+    const payload = serializeAdminOrder(order);
+    // Pack/dispatch QR for the order — rendered on the order page and printed on
+    // the packing slip so the same code can be scanned back in at dispatch.
+    res.json({ ...payload, qr: await orderQrDataUrl(payload.no) });
   })
 );
 
@@ -620,6 +647,14 @@ router.patch(
       });
       return;
     }
+
+    // Optional courier tracking number, typically supplied alongside the move to
+    // SHIPPED (the dedicated /tracking route handles it arriving later).
+    const trackingRaw = req.body?.trackingNumber;
+    const trackingNumber =
+      typeof trackingRaw === "string" && trackingRaw.trim()
+        ? trackingRaw.trim().slice(0, 100)
+        : null;
 
     const order = await prisma.order.findUnique({ where: { id } });
     if (!order) {
@@ -648,7 +683,7 @@ router.patch(
     const transitioned = await notifyTx(async (tx) => {
       const t = await tx.order.updateMany({
         where: { id, status: order.status },
-        data: { status: target as OrderStatus },
+        data: { status: target as OrderStatus, ...(trackingNumber ? { trackingNumber } : {}) },
       });
       if (t.count === 0) return false;
 
@@ -686,6 +721,72 @@ router.patch(
       include: adminOrderInclude,
     });
     res.json(serializeAdminOrder(updated));
+  })
+);
+
+/* PATCH /api/orders/admin/:id/tracking — set / update / clear the courier
+   tracking number. Optional and decoupled from status: the number usually
+   arrives from the courier after the order is already marked SHIPPED. Pass an
+   empty string to clear it. Audit-logged; emits a DELIVERY_UPDATE so the trail
+   matches the rest of the fulfilment flow. */
+router.patch(
+  "/admin/:id/tracking",
+  asyncHandler(requireAdmin),
+  asyncHandler(async (req: Request, res: Response) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      res.status(400).json({ error: "Invalid order id" });
+      return;
+    }
+    const raw = req.body?.trackingNumber;
+    if (typeof raw !== "string") {
+      res.status(400).json({ error: "trackingNumber is required" });
+      return;
+    }
+    const trackingNumber = raw.trim().slice(0, 100) || null;
+
+    const order = await prisma.order.findUnique({
+      where: { id },
+      select: { id: true, trackingNumber: true },
+    });
+    if (!order) {
+      res.status(404).json({ error: "Order not found" });
+      return;
+    }
+
+    await notifyTx(async (tx) => {
+      await tx.order.update({ where: { id }, data: { trackingNumber } });
+      await emitEvent(
+        tx,
+        {
+          type: "DELIVERY_UPDATE",
+          title: trackingNumber
+            ? `Tracking added for order ${orderNo(id)}`
+            : `Tracking cleared for order ${orderNo(id)}`,
+          body: trackingNumber
+            ? `Order ${orderNo(id)} tracking number set to ${trackingNumber}.`
+            : `Order ${orderNo(id)} tracking number was cleared.`,
+          orderId: id,
+          meta: { trackingNumber },
+        },
+        {
+          action: ACTIONS.ORDER_TRACKING_UPDATED,
+          actorType: "ADMIN",
+          actorId: Number(req.currentUser!.id),
+          entityType: "order",
+          entityId: id,
+          meta: { from: order.trackingNumber, to: trackingNumber },
+          req,
+        }
+      );
+    });
+
+    const updated = await prisma.order.findUnique({
+      where: { id },
+      include: adminOrderInclude,
+    });
+    const payload = serializeAdminOrder(updated);
+    res.json({ ...payload, qr: await orderQrDataUrl(payload.no) });
   })
 );
 
