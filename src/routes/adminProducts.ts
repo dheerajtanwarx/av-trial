@@ -239,40 +239,74 @@ router.get(
   asyncHandler(async (req: Request, res: Response) => {
     const q = String(req.query.q ?? "").trim();
     const statusRaw = String(req.query.status ?? "all").toLowerCase();
+    const category = String(req.query.category ?? "").trim();
+    const hasCategory = category !== "" && category.toLowerCase() !== "all";
     const page = Math.max(1, Number(req.query.page) || 1);
     const pageSize = Math.min(50, Math.max(1, Number(req.query.pageSize) || 10));
 
-    const where: Prisma.ProductWhereInput = {};
+    // The search filter is the shared "context" for every count below — the
+    // category bar reflects it (so searching narrows each category's tally),
+    // the status tabs reflect it plus the chosen category, and the page rows
+    // reflect all three.
+    const qWhere: Prisma.ProductWhereInput = {};
     if (q) {
-      where.OR = [
+      qWhere.OR = [
         { name: { contains: q } },
         { slug: { contains: q } },
         { type: { contains: q } },
       ];
     }
+
+    // search + selected category — drives the status counts and the list.
+    const baseWhere: Prisma.ProductWhereInput = { ...qWhere };
+    if (hasCategory) baseWhere.category = { name: category };
+
+    // search + category + status tab — the actual page of rows.
+    const where: Prisma.ProductWhereInput = { ...baseWhere };
     if (statusRaw === "active") where.isActive = true;
     else if (statusRaw === "inactive") where.isActive = false;
 
-    const [total, rows, activeCount, inactiveCount] = await Promise.all([
-      prisma.product.count({ where }),
-      prisma.product.findMany({
-        where,
-        orderBy: { createdAt: "desc" },
-        skip: (page - 1) * pageSize,
-        take: pageSize,
-        include: {
-          category: { select: { id: true, name: true } },
-          images: {
-            select: { imageUrl: true },
-            orderBy: [{ isPrimary: "desc" }, { sortOrder: "asc" }],
-            take: 1,
+    const [total, rows, allCount, activeCount, inactiveCount, grouped, cats] =
+      await Promise.all([
+        prisma.product.count({ where }),
+        prisma.product.findMany({
+          where,
+          orderBy: { createdAt: "desc" },
+          skip: (page - 1) * pageSize,
+          take: pageSize,
+          include: {
+            category: { select: { id: true, name: true } },
+            images: {
+              select: { imageUrl: true },
+              orderBy: [{ isPrimary: "desc" }, { sortOrder: "asc" }],
+              take: 1,
+            },
+            variants: { select: { stockQty: true } },
           },
-          variants: { select: { stockQty: true } },
-        },
-      }),
-      prisma.product.count({ where: { ...where, isActive: true } }),
-      prisma.product.count({ where: { ...where, isActive: false } }),
-    ]);
+        }),
+        prisma.product.count({ where: baseWhere }),
+        prisma.product.count({ where: { ...baseWhere, isActive: true } }),
+        prisma.product.count({ where: { ...baseWhere, isActive: false } }),
+        // Per-category tallies reflect the search only — never the selected
+        // category (you need every category's count to switch between them).
+        prisma.product.groupBy({
+          by: ["categoryId"],
+          where: qWhere,
+          _count: { _all: true },
+        }),
+        prisma.category.findMany({ select: { id: true, name: true, slug: true } }),
+      ]);
+
+    const countByCat = new Map(grouped.map((g) => [g.categoryId, g._count._all]));
+    const categories = cats
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        slug: c.slug,
+        count: countByCat.get(c.id) ?? 0,
+      }))
+      .filter((c) => c.count > 0)
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
 
     res.json({
       products: rows.map((p) => ({
@@ -289,10 +323,13 @@ router.get(
         isActive: p.isActive,
       })),
       counts: {
-        all: q ? total : await prisma.product.count(),
+        all: allCount,
         active: activeCount,
         inactive: inactiveCount,
       },
+      // [{ id, name, slug, count }] — categories with at least one match for the
+      // current search; the frontend prepends an "All" entry summing these.
+      categories,
       page,
       pageSize,
       total,

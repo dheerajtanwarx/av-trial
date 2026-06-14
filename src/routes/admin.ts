@@ -6,6 +6,7 @@ import { toNumber } from "../lib/money";
 import { requireAdmin } from "../middleware/authMiddleware";
 import { uploadImage, cloudinaryConfigured } from "../lib/cloudinary";
 import { OrderStatus } from "../../generated/prisma/client";
+import { PENDING_STATUSES, startOfTodayIST } from "../lib/orderFilters";
 
 const router = Router();
 
@@ -57,19 +58,7 @@ const REVENUE_STATUSES: OrderStatus[] = [
   "DELIVERED",
 ];
 
-/** In-flight orders that still need admin action (not yet delivered/closed). */
-const PENDING_STATUSES: OrderStatus[] = ["PLACED", "CONFIRMED", "PROCESSING", "SHIPPED"];
-
 const TREND_DAYS = 14;
-
-/** Start of the current calendar day in IST — "today" means the Indian
-    business day regardless of server timezone. */
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-function startOfTodayIST(): Date {
-  const nowIst = new Date(Date.now() + IST_OFFSET_MS);
-  nowIst.setUTCHours(0, 0, 0, 0);
-  return new Date(nowIst.getTime() - IST_OFFSET_MS);
-}
 
 /** Local-time YYYY-MM-DD key for day bucketing. */
 function dayKey(d: Date): string {

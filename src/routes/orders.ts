@@ -7,6 +7,12 @@ import { PaymentMethod, PaymentStatus, OrderStatus } from "../../generated/prism
 import { buildInvoicePdf } from "../lib/invoice";
 import { orderQrDataUrl } from "../lib/qr";
 import { ACTIONS, emitEvent, emitStockAlerts, logActivity, notifyTx } from "../lib/notify";
+import {
+  ORDER_STATUS_FILTERS,
+  PENDING_STATUSES,
+  orderFilterWhere,
+  startOfTodayIST,
+} from "../lib/orderFilters";
 
 const router = Router();
 
@@ -467,17 +473,6 @@ const STATUS_RANK: Record<string, number> = {
   DELIVERED: 4,
 };
 
-/** The status filters the admin list understands (plus "all"). */
-const ADMIN_FILTERS: OrderStatus[] = [
-  "PLACED",
-  "CONFIRMED",
-  "PROCESSING",
-  "SHIPPED",
-  "DELIVERED",
-  "CANCELLED",
-  "RETURNED",
-];
-
 /** Detail include: everything serializeOrder needs + the customer record. */
 const adminOrderInclude = {
   ...orderInclude,
@@ -498,18 +493,18 @@ function serializeAdminOrder(o: any) {
 }
 
 /* GET /api/orders/admin — paginated order list with search + status filter.
-   Query: q (order no / customer name / email), status (one of ADMIN_FILTERS
-   or "all"), page (1-based), pageSize. Returns rows + pagination + per-status
-   counts for the filter chips (counts honour the search but not the status). */
+   Query: q (order no / customer name / email), status (a single OrderStatus,
+   the derived `pending` / `today` / `refunded` filters, or "all"), page
+   (1-based), pageSize. Returns rows + pagination + per-filter counts for the
+   chips (counts honour the search but not the active filter). */
 router.get(
   "/admin",
   asyncHandler(requireAdmin),
   asyncHandler(async (req: Request, res: Response) => {
     const q = String(req.query.q ?? "").trim();
-    const statusRaw = String(req.query.status ?? "all").toUpperCase();
-    const status = ADMIN_FILTERS.includes(statusRaw as OrderStatus)
-      ? (statusRaw as OrderStatus)
-      : null;
+    // Resolve the requested filter (status / pending / today / refunded) to a
+    // shared where-fragment; null means "all" (no extra constraint).
+    const filterWhere = orderFilterWhere(String(req.query.status ?? "all"));
 
     const page = Math.max(1, Number(req.query.page) || 1);
     const pageSize = Math.min(50, Math.max(1, Number(req.query.pageSize) || 10));
@@ -525,9 +520,9 @@ router.get(
       ];
     }
 
-    const where = status ? { ...searchWhere, status } : searchWhere;
+    const where = filterWhere ? { ...searchWhere, ...filterWhere } : searchWhere;
 
-    const [total, rows, grouped] = await Promise.all([
+    const [total, rows, grouped, todayCount, refundedCount] = await Promise.all([
       prisma.order.count({ where }),
       prisma.order.findMany({
         where,
@@ -545,14 +540,23 @@ router.get(
         where: searchWhere,
         _count: { _all: true },
       }),
+      prisma.order.count({ where: { ...searchWhere, placedAt: { gte: startOfTodayIST() } } }),
+      prisma.order.count({
+        where: { ...searchWhere, payments: { some: { status: "REFUNDED" } } },
+      }),
     ]);
 
     const counts: Record<string, number> = { all: 0 };
-    for (const f of ADMIN_FILTERS) counts[f] = 0;
+    for (const f of ORDER_STATUS_FILTERS) counts[f] = 0;
     for (const g of grouped) {
       counts[g.status] = g._count._all;
       counts.all += g._count._all;
     }
+    // Derived chip counts: pending is the sum of its statuses (no extra query);
+    // today and refunded come from their own count queries above.
+    counts.pending = PENDING_STATUSES.reduce((sum, s) => sum + (counts[s] ?? 0), 0);
+    counts.today = todayCount;
+    counts.refunded = refundedCount;
 
     res.json({
       orders: rows.map((o) => ({
